@@ -19,31 +19,27 @@
 		{csrf}
 		{include file="controllers/notification/inPlaceNotification.tpl" notificationId="pmcSettingsFormNotification"}
 		{fbvFormArea id="pmcSettingsFormArea"}
-			<p class="pkp_help">{translate key="plugins.importexport.pmc.description"}</p>
+			<p class="pkp_help">
+				{translate key="plugins.importexport.pmc.description"}
+			</p>
 			<br/>
 			{fbvFormSection list="true"}
 				{fbvElement type="checkbox" id="jatsImported" label="plugins.importexport.pmc.settings.form.jatsImportedOnly" checked=$jatsImported|compare:true}
 			{/fbvFormSection}
 
 			{fbvFormSection}
-				<span class="instruct">{translate key="plugins.importexport.pmc.settings.form.nlmTitle.description"}</span><br/>
+				<span class="instruct">{translate key="plugins.importexport.pmc.settings.form.nlmTitle.description"}</span>
+				<br/>
 				{fbvElement type="text" id="nlmTitle" value=$nlmTitle label="plugins.importexport.pmc.settings.form.nlmTitle" maxlength="100" size=$fbvStyles.size.MEDIUM}
 			{/fbvFormSection}
 
 			{capture assign="sectionTitle"}{translate key="plugins.importexport.pmc.endpoint"}{/capture}
 			{fbvFormSection id="formSection" title=$sectionTitle translate=false class="endpointContainer"}
-				{fbvElement type="select" id="type" from=$endpointTypeOptions selected=$type label="plugins.importexport.pmc.type" size=$fbvStyles.size.SMALL translate=false}
-				<div class="endpointDetails">
-					<div class="presetField ftp sftp">
-						{fbvElement type="text" id="host" value=$host label="plugins.importexport.pmc.host" maxlength="120" size=$fbvStyles.size.MEDIUM}
-						{fbvElement type="text" id="port" value=$port label="plugins.importexport.pmc.port" maxlength="5" size=$fbvStyles.size.MEDIUM}
-						{fbvElement type="text" id="path" value=$path label="plugins.importexport.pmc.path" maxlength="120" size=$fbvStyles.size.MEDIUM}
-					</div>
-					{fbvElement type="text" id="username" value=$username label="plugins.importexport.pmc.username" maxlength="120" size=$fbvStyles.size.MEDIUM}
-					<div class="authentication-password">
-						{fbvElement type="text" password=true id="password" value=$password label="plugins.importexport.pmc.password" maxlength="120" size=$fbvStyles.size.MEDIUM}
-					</div>
-				</div>
+				{fbvElement type="text" id="host" value=$host label="plugins.importexport.pmc.host" maxlength="120" size=$fbvStyles.size.MEDIUM}
+				{fbvElement type="text" id="port" value=$port label="plugins.importexport.pmc.port" maxlength="5" size=$fbvStyles.size.MEDIUM}
+				{fbvElement type="text" id="path" value=$path label="plugins.importexport.pmc.path" maxlength="120" size=$fbvStyles.size.MEDIUM}
+				{fbvElement type="text" id="username" value=$username label="plugins.importexport.pmc.username" maxlength="120" size=$fbvStyles.size.MEDIUM}
+				{fbvElement type="text" password=true id="password" value=$password label="plugins.importexport.pmc.password" maxlength="120" size=$fbvStyles.size.MEDIUM}
 			{/fbvFormSection}
 		{/fbvFormArea}
 		{fbvFormButtons submitText="common.save" hideCancel="true"}

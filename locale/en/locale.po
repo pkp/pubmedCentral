@@ -16,9 +16,6 @@ msgstr ""
 msgid "plugins.importexport.pmc.description.short"
 msgstr "This plugin may be used to export your journal content to PubMed Central."
 
-msgid "plugins.importexport.pmc.type"
-msgstr "Server Type"
-
 msgid "plugins.importexport.pmc.host"
 msgstr "Host"
 
@@ -32,7 +29,7 @@ msgid "plugins.importexport.pmc.path"
 msgstr "Path"
 
 msgid "plugins.importexport.pmc.port"
-msgstr "Port (optional, SFTP defaults to 22, FTP to 21)"
+msgstr "Port (optional, defaults to 21)"
 
 msgid "plugins.importexport.pmc.endpoint"
 msgstr "Connection Details"

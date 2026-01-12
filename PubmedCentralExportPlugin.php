@@ -30,9 +30,6 @@ use League\Flysystem\Filesystem;
 use League\Flysystem\FilesystemException;
 use League\Flysystem\Ftp\FtpAdapter;
 use League\Flysystem\Ftp\FtpConnectionOptions;
-use League\Flysystem\PhpseclibV3\SftpAdapter;
-use League\Flysystem\PhpseclibV3\SftpConnectionProvider;
-use League\Flysystem\UnixVisibility\PortableVisibilityConverter;
 use PKP\context\Context;
 use PKP\core\JSONMessage;
 use PKP\db\DAORegistry;
@@ -293,35 +290,13 @@ class PubmedCentralExportPlugin extends PubObjectsExportPlugin implements HasTas
         }
 
         // Perform the deposit
-        $adapter = match ($settings['type']) {
-            'ftp' => new FtpAdapter(FtpConnectionOptions::fromArray([
+        $adapter = new FtpAdapter(FtpConnectionOptions::fromArray([
                 'host' => $settings['host'],
                 'port' => (int)$settings['port'] ?: 21,
                 'username' => $settings['username'],
                 'password' => $settings['password'],
                 'root' => $settings['path'],
-            ])),
-            'sftp' => new SftpAdapter(
-                new SftpConnectionProvider(
-                    host: $settings['host'],
-                    username: $settings['username'],
-                    password: $settings['password'],
-                    port: (int)$settings['port'] ?: 22,
-                ),
-                $settings['path'] ?? '/',
-                PortableVisibilityConverter::fromArray([
-                    'file' => [
-                        'public' => 0640,
-                        'private' => 0604,
-                    ],
-                    'dir' => [
-                        'public' => 0740,
-                        'private' => 7604,
-                    ],
-                ])
-            ),
-            default => throw new Exception('Unknown endpoint type!'), // @todo handle error
-        };
+            ]));
 
         foreach ($filenames as $filename => $filepath) {
             $fs = new Filesystem($adapter);
@@ -368,7 +343,6 @@ class PubmedCentralExportPlugin extends PubObjectsExportPlugin implements HasTas
                 // add galleys
                 $fileService = app()->get('file');
                 foreach ($publication->getData('galleys') ?? [] as $galley) {
-                    error_log(print_r($galley, true));
                     $submissionFileId = $galley->getData('submissionFileId');
                     $submissionFile = $submissionFileId ? Repo::submissionFile()->get($submissionFileId) : null;
                     if (!$submissionFile) {
@@ -379,12 +353,7 @@ class PubmedCentralExportPlugin extends PubObjectsExportPlugin implements HasTas
                     $filePath = $fileService->get($submissionFile->getData('fileId'))->path;
                     $extension = pathinfo($filePath, PATHINFO_EXTENSION);
                     $galleyFilename = $filename . '/' . $this->buildFileName($pubId, false, $extension);
-                    // @todo make sure files meet 2GB max size requirement? e.g:
-//                    $filesize = $fileService->fs->fileSize($filePath);
-//                    if ($filesize > 2147483648) {
-//                        error_log('Galley file is too large for PMC');
-//                        // @todo
-//                    }
+                    // @todo make sure files meet 2GB max size requirement?
 
                     if (
                         !$zip->addFromString(

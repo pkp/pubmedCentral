@@ -60,15 +60,6 @@ class PubmedCentralSettingsForm extends PubObjectsExportSettingsForm
      */
     public function fetch($request, $template = null, $display = false)
     {
-        // @todo update when we determine what PMC uses
-        $templateMgr = TemplateManager::getManager($request);
-        $templateMgr->assign([
-            'endpointTypeOptions' => [
-                '' => '',
-                'sftp' => 'SFTP',
-                'ftp' => 'FTP',
-            ]
-        ]);
         return parent::fetch($request, $template, $display);
     }
 
