@@ -35,9 +35,11 @@ use PKP\context\Context;
 use PKP\core\JSONMessage;
 use PKP\db\DAORegistry;
 use PKP\file\FileManager;
+use PKP\galley\Galley;
 use PKP\notification\Notification;
 use PKP\plugins\interfaces\HasTaskScheduler;
 use PKP\scheduledTask\PKPScheduler;
+use PKP\submission\Genre;
 use PKP\submission\GenreDAO;
 use ZipArchive;
 
@@ -341,31 +343,44 @@ class PubmedCentralExportPlugin extends PubObjectsExportPlugin implements HasTas
                     return [['plugins.importexport.pmc.export.failure.creatingFile', $errorMessage]];
                 }
 
-                // add galleys
+                // Add article galley file
                 $fileService = app()->get('file');
-                foreach ($publication->getData('galleys') ?? [] as $galley) {
-                    $submissionFileId = $galley->getData('submissionFileId');
-                    $submissionFile = $submissionFileId ? Repo::submissionFile()->get($submissionFileId) : null;
-                    if (!$submissionFile) {
+                $genreDao = DAORegistry::getDAO('GenreDAO'); /** @var GenreDAO $genreDao */
+                foreach ($publication->getData('galleys') ?? [] as $galley) { /** @var Galley $galley */
+                    // Ignore remote galleys
+                    if ($galley->getData('urlRemote')) {
                         continue;
                     }
 
-                    // @todo check for filename in the JATS and add or replace it with the new filename to meet pmc requirements
-                    $filePath = $fileService->get($submissionFile->getData('fileId'))->path;
-                    $extension = pathinfo($filePath, PATHINFO_EXTENSION);
-                    $galleyFilename = $filename . '/' . $this->buildFileName($pubId, false, $extension);
-                    // @todo make sure files meet 2GB max size requirement?
+                    $submissionFileId = $galley->getData('submissionFileId');
+                    $galleyFile = $submissionFileId ? Repo::submissionFile()->get($submissionFileId) : null;
+                    if (!$galleyFile) {
+                        continue;
+                    }
 
+                    $genre = $genreDao->getById($galleyFile->getData('genreId'));
                     if (
-                        !$zip->addFromString(
-                            $galleyFilename,
-                            $fileService->fs->read($filePath)
-                        )
+                        $genre->getCategory() == Genre::GENRE_CATEGORY_DOCUMENT &&
+                        !$genre->getSupplementary() &&
+                        !$genre->getDependent()
                     ) {
-                        error_log("Unable to add file {$filePath} to PMC ZIP");
-                        $errorMessage = ''; //@todo
-                        $this->updateStatus($object, PubObjectsExportPlugin::EXPORT_STATUS_ERROR, $errorMessage);
-                        return [['plugins.importexport.pmc.export.failure.creatingFile', $errorMessage]];
+                        // @todo check for filename in the JATS and add or replace it with the new filename to meet pmc requirements
+                        $filePath = $fileService->get($galleyFile->getData('fileId'))->path;
+                        $extension = pathinfo($filePath, PATHINFO_EXTENSION);
+                        $galleyFilename = $filename . '/' . $this->buildFileName($pubId, false, $extension);
+                        // @todo make sure files meet 2GB max size requirement?
+
+                        if (
+                            !$zip->addFromString(
+                                $galleyFilename,
+                                $fileService->fs->read($filePath)
+                            )
+                        ) {
+                            error_log("Unable to add file {$filePath} to PMC ZIP");
+                            $errorMessage = ''; //@todo
+                            $this->updateStatus($object, PubObjectsExportPlugin::EXPORT_STATUS_ERROR, $errorMessage);
+                            return [['plugins.importexport.pmc.export.failure.creatingFile', $errorMessage]];
+                        }
                     }
                 }
                 $paths[$this->buildFileName($pubId, true)] = $path;
