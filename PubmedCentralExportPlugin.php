@@ -8,7 +8,7 @@
  * Distributed under the GNU GPL v3. For full terms see the file LICENSE.
  *
  * @class PubmedCentralExportPlugin
- * @brief Pubmed Central export plugin
+ * @brief PubMed Central export plugin
  */
 
 namespace APP\plugins\generic\pubmedCentral;
@@ -30,6 +30,7 @@ use Exception;
 use League\Flysystem\Filesystem;
 use League\Flysystem\FilesystemException;
 use League\Flysystem\Ftp\FtpAdapter;
+use League\Flysystem\Ftp\FtpConnectionException;
 use League\Flysystem\Ftp\FtpConnectionOptions;
 use PKP\context\Context;
 use PKP\core\JSONMessage;
@@ -41,6 +42,7 @@ use PKP\plugins\interfaces\HasTaskScheduler;
 use PKP\scheduledTask\PKPScheduler;
 use PKP\submission\Genre;
 use PKP\submission\GenreDAO;
+use PKP\xslt\XSLTransformer;
 use ZipArchive;
 
 class PubmedCentralExportPlugin extends PubObjectsExportPlugin implements HasTaskScheduler
@@ -49,20 +51,17 @@ class PubmedCentralExportPlugin extends PubObjectsExportPlugin implements HasTas
     public const JATS_SYSTEM_ID = 'http://jats.nlm.nih.gov/publishing/1.2/JATS-journalpublishing1.dtd';
     public const JATS_VERSION = '1.2';
 
-    private Context $context;
-
     /**
      * @copydoc ImportExportPlugin::display()
      * @throws Exception
      */
     public function display($args, $request): void
     {
-        $this->context = $request->getContext();
+        $context = $request->getContext();
         parent::display($args, $request);
         $templateManager = TemplateManager::getManager();
         $templateManager->assign([
             'ftpLibraryMissing' => !class_exists('\League\Flysystem\Ftp\FtpAdapter'),
-            'issn' => ($this->context->getData('onlineIssn') || $this->context->getData('printIssn')),
         ]);
 
         switch (array_shift($args)) {
@@ -76,15 +75,18 @@ class PubmedCentralExportPlugin extends PubObjectsExportPlugin implements HasTas
 
     /**
      * Create a filename for files created in the plugin, removing any invalid characters.
+     *
+     * @param string|null $articleId The article ID to include in the filename.
+     * @param bool $ts Whether to include a timestamp in the filename.
+     * @param string|null $fileExtension The optional file extension to include in the filename.
      */
-    private function buildFileName(?string $articleId = null, bool $ts = false, ?string $fileExtension = null): string
+    private function buildFileName(Context $context, ?string $articleId = null, bool $ts = false, ?string $fileExtension = null): string
     {
         // @todo add setting to select vol/issue naming vs. continuous pub naming?
-        $locale = $this->context->getData('primaryLocale');
-        $acronym = preg_replace('/[^a-zA-Z0-9]/', '', $this->context->getData('acronym', $locale));
+        $nlmTitle = preg_replace('/[^a-zA-Z0-9]/', '', $this->nlmTitle($context));
         $timeStamp = date('YmdHis');
         return strtolower(
-            $acronym .
+            $nlmTitle .
             ($articleId ? '-' . $articleId : '') .
             ($ts ? '-' . $timeStamp : '') .
             ($fileExtension ? '.' . $fileExtension : '')
@@ -107,9 +109,7 @@ class PubmedCentralExportPlugin extends PubObjectsExportPlugin implements HasTas
         $context = $request->getContext();
         if ($request->getUserVar(PubObjectsExportPlugin::EXPORT_ACTION_DEPOSIT)) {
             $resultErrors = [];
-            $paths = $this->createZip($objects, $context);
-            // @todo move creation of zip into deposit? easier to track objects.
-            $result = $this->depositXML($objects, $context, $paths);
+            $result = $this->depositXML($objects, $context);
             if (is_array($result)) {
                 $resultErrors[] = $result;
             }
@@ -135,15 +135,17 @@ class PubmedCentralExportPlugin extends PubObjectsExportPlugin implements HasTas
                     }
                 }
             }
-            foreach ($paths as $path) {
-                unlink($path);
-            }
             // Redirect back to the right tab
             $request->redirect(null, null, null, ['plugin', $this->getName()], null, $tab);
         } elseif ($request->getUserVar(PubObjectsExportPlugin::EXPORT_ACTION_EXPORT)) {
             $path = $this->createZipCollection($objects, $context);
             $fileManager = new FileManager();
-            $fileManager->downloadByPath($path, 'application/zip', false, $this->buildFileName(null, true, 'zip'));
+            $fileManager->downloadByPath(
+                $path,
+                'application/zip',
+                false,
+                $this->buildFileName($context, true, false, 'zip')
+            );
             $fileManager->deleteByPath($path);
         } else {
             parent::executeExportAction(
@@ -170,29 +172,35 @@ class PubmedCentralExportPlugin extends PubObjectsExportPlugin implements HasTas
      * @return string|array XML document or error message.
      * @throws Exception
      */
-    public function exportXML($object, $filter, $context, $noValidation = null, &$outputErrors = null)
-    {
+    public function exportXML(
+        $object,
+        $filter,
+        $context,
+        $noValidation = null,
+        &$outputErrors = null,
+        ?array $articleFilenames = null
+    ) {
         libxml_use_internal_errors(true); // @todo remove?
 
         $publication = $object instanceof Publication ? $object : $object->getCurrentPublication();
         $submissionId = $object instanceof Publication ? $object->getData('submissionId') : $object->getId();
 
-        // @todo probably need to update for genredao refactor
         $genreDao = DAORegistry::getDAO('GenreDAO'); /** @var GenreDAO $genreDao */
-        $genres = $genreDao->getEnabledByContextId($this->context->getId());
+        $genres = $genreDao->getEnabledByContextId($context->getId());
 
         $document = Repo::jats()
             ->getJatsFile($publication->getId(), $submissionId, $genres->toArray());
 
         // If this setting is enabled, only export user-uploaded JATS files and
         // do not generate our own JATS.
-        $jatsImportedOnly = $this->jatsImportedOnly($this->context);
+        $jatsImportedOnly = $this->jatsImportedOnly($context);
 
         // Check if the JATS file was found and that it was not generated.
         if (
             !$document ||
             !$document->jatsContent ||
-            ($jatsImportedOnly == $document->isDefaultContent)
+            ($jatsImportedOnly && $document->isDefaultContent) ||
+            $document->loadingContentError
         ) {
             $outputErrors[] = __('plugins.importexport.pmc.export.failure.jatsFileNotFound');
         }
@@ -212,10 +220,30 @@ class PubmedCentralExportPlugin extends PubObjectsExportPlugin implements HasTas
 
         // If the JATS document is system-generated, modify it to ensure it meets PMC requirements.
         if ($document->isDefaultContent) {
-            return $this->modifyJats($xml, $object, $submissionId);
+            $modifiedXml = $this->modifyJats($xml, $context, $object, $submissionId, $articleFilenames);
+            if (is_array($modifiedXml)) {
+                $errorMessage = implode(PHP_EOL, $modifiedXml); // @todo add error message key
+                $this->updateStatus($object, PubObjectsExportPlugin::EXPORT_STATUS_ERROR, $errorMessage);
+                // @todo handle error properly
+                throw new Exception('JATS errors encountered while modifying XML');
+            }
+            $returnXml = $modifiedXml;
+        } else {
+            $returnXml = $xml;
         }
 
-        return $xml;
+        // Validate the XML document.
+        $dom = new DOMDocument();
+        $dom->loadXML($returnXml);
+        $validation = $this->validateJats($dom);
+        if (is_array($validation)) {
+            $validationMessage = implode(PHP_EOL, $validation);
+            $errorMessage = __('plugins.importexport.pmc.export.failure.jatsValidation', ['param' => $validationMessage]);
+            $this->updateStatus($object, PubObjectsExportPlugin::EXPORT_STATUS_ERROR, $errorMessage);
+            error_log('JATS Validation Failed: ' . $errorMessage);
+            return [['plugins.importexport.pmc.export.failure.jatsValidation', ['param' => $validationMessage]]];
+        }
+        return $returnXml;
     }
 
     /**
@@ -231,7 +259,7 @@ class PubmedCentralExportPlugin extends PubObjectsExportPlugin implements HasTas
      */
     public function getObjectAdditionalSettings(): array
     {
-        // @todo maybe add last export date?
+        // @todo store last export date?
         return array_merge(parent::getObjectAdditionalSettings(), [
             $this->getDepositStatusSettingName()
         ]);
@@ -267,10 +295,9 @@ class PubmedCentralExportPlugin extends PubObjectsExportPlugin implements HasTas
     /**
      * Exports a zip file with the selected articles to the configured PMC account.
      *
-     * @param array $filenames the filenames and path(s) of the zip file(s)
      * @throws Exception|FilesystemException
      */
-    public function depositXml($objects, $context, $filenames): bool|array
+    public function depositXML($objects, $context, $filename = null): bool|array
     {
         // Get connection settings
         $settings = $this->getConnectionSettings($context);
@@ -292,13 +319,32 @@ class PubmedCentralExportPlugin extends PubObjectsExportPlugin implements HasTas
                 'password' => $settings['password'],
                 'root' => $settings['path'],
             ]));
+        $fs = new Filesystem($adapter); // @todo test this, was in loop below before
 
-        foreach ($filenames as $filename => $filepath) {
-            $fs = new Filesystem($adapter);
-            $fp = fopen($filepath, 'r');
-            $fs->writeStream($filename . '.zip', $fp);
-            fclose($fp);
-            // @todo check if file is deleted
+        $packagedObjects = $this->createZip($objects, $context);
+        // @todo catch exception e.g. for authentication errors
+        foreach ($packagedObjects as $pubId => $objectDetails) {
+            error_log(print_r($objectDetails, true));
+            $fp = fopen($objectDetails['path'], 'r');
+            if ($fp == false) {
+                // @todo returns false on error
+            }
+            try {
+                $fs->writeStream($objectDetails['filename'] . '.zip', $fp);
+            } catch (FtpConnectionException $e) {
+                error_log('caught ftp connection exception: ' . $e->getMessage());
+                throw $e;
+            }
+
+            // @todo need to update status of object for success or errors above, e.g.
+            // $object->setData($this->getDepositStatusSettingName(), PubObjectsExportPlugin::EXPORT_STATUS_REGISTERED);
+            // $this->updateObject($object);
+            if (fclose($fp) == false) {
+                // @todo returns false on error
+            }
+            if (unlink($objectDetails['path']) == false) {
+                // @todo returns false on error
+            }
         }
 
         return true;
@@ -307,90 +353,114 @@ class PubmedCentralExportPlugin extends PubObjectsExportPlugin implements HasTas
     /**
      * Creates a zip file with the given publications.
      *
-     * @return array the paths of the created zip files
+     * @return array|false the paths of the created zip files
      * @throws Exception
      */
-    public function createZip(array $objects, Context $context): array
+    public function createZip(array $objects, Context $context, $isDownload = false): array|false
     {
-        // @todo replace with filemanager?
         $paths = [];
-        try {
-            foreach ($objects as $object) {
-                $path = tempnam(sys_get_temp_dir(), 'tmp');
-                $zip = new ZipArchive();
-                if ($zip->open($path, ZipArchive::CREATE) !== true) {
+        // @todo check if objects is empty
+        foreach ($objects as $object) {
+            $path = tempnam(sys_get_temp_dir(), 'tmp');
+            $zip = new ZipArchive();
+            if ($zip->open($path, ZipArchive::CREATE) !== true) {
+                if (!$isDownload) {
                     $errorMessage = __('plugins.importexport.pmc.export.failure.creatingFile', [
                         'param' => $zip->getStatusString()
                     ]);
                     $this->updateStatus($object, PubObjectsExportPlugin::EXPORT_STATUS_ERROR, $errorMessage);
-                    return [['plugins.importexport.pmc.export.failure.creatingFile']];
+                }
+                return false; // @todo return array that start with error key or something similar?
+                //return [['plugins.importexport.pmc.export.failure.creatingFile']];
+            }
+
+            $publication = $object instanceof Submission ? $object->getCurrentPublication() : $object;
+            $pubId = $publication->getId();
+            $filename = $this->buildFileName($context, $pubId);
+
+            // Add an article galley file
+            $fileService = app()->get('file');
+            $genreDao = DAORegistry::getDAO('GenreDAO'); /** @var GenreDAO $genreDao */
+            $articleFilenames = [];
+            foreach ($publication->getData('galleys') ?? [] as $galley) { /** @var Galley $galley */
+                // Ignore remote galleys
+                if ($galley->getData('urlRemote')) {
+                    continue;
                 }
 
-                $publication = $object instanceof Submission ? $object->getCurrentPublication() : $object;
-                $pubId = $publication->getId();
-                $document = $this->exportXML($object, null, $this->context, null, $errors);
-                $filename = $this->buildFileName($pubId);
-                $articlePathName = $filename . '/' . $this->buildFileName($pubId, false, 'xml');
+                $submissionFileId = $galley->getData('submissionFileId');
+                $galleyFile = $submissionFileId ? Repo::submissionFile()->get($submissionFileId) : null;
+                if (!$galleyFile) {
+                    continue;
+                }
+                $genre = $genreDao->getById($galleyFile->getData('genreId'));
+                if (
+                    $genre->getCategory() == Genre::GENRE_CATEGORY_DOCUMENT &&
+                    !$genre->getSupplementary() &&
+                    !$genre->getDependent()
+                ) {
+                    $filePath = $fileService->get($galleyFile->getData('fileId'))->path;
+                    $extension = pathinfo($filePath, PATHINFO_EXTENSION);
+                    $galleyFilename = $filename . '/' . $this->buildFileName($context, $pubId, false, $extension);
+                    $articleFilenames[] = $this->buildFileName($context, $pubId, false, $extension);
+                    // @todo make sure files meet 2GB max size requirement?
 
-                if (!$zip->addFromString($articlePathName, $document)) {
+                    if (
+                        !$zip->addFromString(
+                            $galleyFilename,
+                            $fileService->fs->read($filePath)
+                        )
+                    ) {
+                        if (!$isDownload) {
+                            $errorMessage = __('plugins.importexport.pmc.export.failure.addingFile', [
+                                'filePath' => $filePath,
+                                'param' => $zip->getStatusString()
+                            ]);
+                            $this->updateStatus($object, PubObjectsExportPlugin::EXPORT_STATUS_ERROR, $errorMessage);
+                        }
+                        return false;
+                    }
+                }
+            }
+
+            if (count($articleFilenames) > 1) {
+                if (!$isDownload) {
+                    $this->updateStatus(
+                        $object,
+                        PubObjectsExportPlugin::EXPORT_STATUS_ERROR,
+                        __('plugins.importexport.pmc.export.failure.multipleArticleFiles')
+                    );
+                }
+                return false;
+            }
+            $paths[$pubId]['filename'] = $this->buildFileName($context, $pubId, true);
+            $paths[$pubId]['path'] = $path;
+
+            // Add article XML to zip
+            $errors = [];
+            $document = $this->exportXML($object, null, $context, null, $errors, $articleFilenames);
+            if ($errors && !is_string($document)) {
+                error_log(print_r($errors, true)); // @todo
+                return false;
+            }
+
+            $articlePathName = $filename . '/' . $this->buildFileName($context, $pubId, false, 'xml');
+
+            if (!$zip->addFromString($articlePathName, $document)) {
+                if (!$isDownload) {
                     $errorMessage = __('plugins.importexport.pmc.export.failure.addingFile', [
                         'filePath' => $articlePathName,
                         'param' => $zip->getStatusString()
                     ]);
                     $this->updateStatus($object, PubObjectsExportPlugin::EXPORT_STATUS_ERROR, $errorMessage);
-                    return [['plugins.importexport.pmc.export.failure.creatingFile', $zip->getStatusString()]];
                 }
-
-                // Add article galley file
-                $fileService = app()->get('file');
-                $genreDao = DAORegistry::getDAO('GenreDAO'); /** @var GenreDAO $genreDao */
-                foreach ($publication->getData('galleys') ?? [] as $galley) { /** @var Galley $galley */
-                    // Ignore remote galleys
-                    if ($galley->getData('urlRemote')) {
-                        continue;
-                    }
-
-                    $submissionFileId = $galley->getData('submissionFileId');
-                    $galleyFile = $submissionFileId ? Repo::submissionFile()->get($submissionFileId) : null;
-                    if (!$galleyFile) {
-                        // @todo error if no submission file?
-                        continue;
-                    }
-
-                    $genre = $genreDao->getById($galleyFile->getData('genreId'));
-                    if (
-                        $genre->getCategory() == Genre::GENRE_CATEGORY_DOCUMENT &&
-                        !$genre->getSupplementary() &&
-                        !$genre->getDependent()
-                    ) {
-                        // @todo check for filename in the JATS and add or replace it with the new filename to meet pmc requirements
-                        $filePath = $fileService->get($galleyFile->getData('fileId'))->path;
-                        $extension = pathinfo($filePath, PATHINFO_EXTENSION);
-                        $galleyFilename = $filename . '/' . $this->buildFileName($pubId, false, $extension);
-                        // @todo make sure files meet 2GB max size requirement?
-
-                        if (
-                            !$zip->addFromString(
-                                $galleyFilename,
-                                $fileService->fs->read($filePath)
-                            )
-                        ) {
-                            $errorMessage = __('plugins.importexport.pmc.export.failure.addingFile', [
-                                'filePath' => $articlePathName,
-                                'param' => $zip->getStatusString()
-                            ]);
-                            $this->updateStatus($object, PubObjectsExportPlugin::EXPORT_STATUS_ERROR, $errorMessage);
-                            return [['plugins.importexport.pmc.export.failure.addingFile', $zip->getStatusString()]];
-                        }
-                    }
-                }
-                $paths[$this->buildFileName($pubId, true)] = $path;
+                return false;
             }
-        } finally {
             if (!$zip->close()) {
-                return [['plugins.importexport.pmc.export.failure.creatingFile', $zip->getStatusString()]];
+                return false;
             }
         }
+
         return $paths;
     }
 
@@ -402,19 +472,18 @@ class PubmedCentralExportPlugin extends PubObjectsExportPlugin implements HasTas
     private function createZipCollection(array $objects, Context $context): string|array
     {
         $finalZipPath = tempnam(sys_get_temp_dir(), 'tmp');
-
         $finalZip = new ZipArchive();
         if ($finalZip->open($finalZipPath, ZipArchive::CREATE) !== true) {
             return [['plugins.importexport.pmc.export.failure.creatingFile', $finalZip->getStatusString()]];
         }
 
-        $paths = $this->createZip($objects, $context);
-        foreach ($paths as $filename => $path) {
-            if (!$finalZip->addFile($path, $filename . '.zip')) {
-                $returnMessage = $finalZip->getStatusString() . '(' . $filename . ')';
+        $paths = $this->createZip($objects, $context, true);
+        foreach ($paths as $key => $filePath) {
+            if (!$finalZip->addFile($filePath['path'], $filePath['filename'] . '.zip')) {
+                $returnMessage = $finalZip->getStatusString() . '(' . $filePath['filename'] . ')';
                 return [[
-                    'plugins.importexport.pmc.export.failure.creatingFile',
-                    $returnMessage
+                'plugins.importexport.pmc.export.failure.creatingFile',
+                $returnMessage
                 ]];
             }
         }
@@ -554,25 +623,28 @@ class PubmedCentralExportPlugin extends PubObjectsExportPlugin implements HasTas
      * Modify the JATS XML to meet PMC requirements.
      * @throws Exception
      */
-    public function modifyJats(string $importedJats, Submission|Publication $object, int $submissionId): string
-    {
-        //@todo could imported jats be empty? e.g. if jats template plugin was missing
-
+    public function modifyJats(
+        string $importedJats,
+        Context $context,
+        Submission|Publication $object,
+        int $submissionId,
+        ?array $articleFilenames
+    ): string|array {
         $dom = new DOMDocument();
-        //$dom->preserveWhiteSpace = false; @todo uncomment later
+        $dom->preserveWhiteSpace = false;
         $dom->loadXML($importedJats);
         $xpath = new DOMXPath($dom);
 
+        // @todo check if this is caught later in validation
         $bodyNode = $xpath->query('//article/body')->item(0);
         if (!$bodyNode) {
-            throw new Exception('No body node found in JATS XML.'); // @todo improve error handling
+            return [['plugins.importexport.pmc.export.failure.jatsValidationBody']];
         }
 
         // Add Journal identifier for pmc and remove unsupported journal identifiers
-        $journalId = $this->nlmTitle($this->context);
+        $journalId = $this->nlmTitle($context);
         $journalIdNode = $dom->createElement('journal-id', $journalId);
         $journalIdNode->setAttribute('journal-id-type', 'pmc');
-
         $journalMetaNode = $xpath->query('//article/front/journal-meta')->item(0);
         $journalMetaChildElement = $xpath->query('//article/front/journal-meta/*[1]')->item(0);
         $journalMetaNode->insertBefore($journalIdNode, $journalMetaChildElement);
@@ -583,7 +655,7 @@ class PubmedCentralExportPlugin extends PubObjectsExportPlugin implements HasTas
             $node->parentNode->removeChild($node);
         }
 
-        // Add NLM title as abbreviated journal title
+        // Add NLM title as the abbreviated journal title
         $nlmJournalTitleNode = $dom->createElement('abbrev-journal-title');
         $nlmJournalTitleNode->setAttribute('abbrev-type', 'nlm-ta');
         $nlmJournalTitleNode->appendChild($dom->createTextNode($journalId));
@@ -649,7 +721,26 @@ class PubmedCentralExportPlugin extends PubObjectsExportPlugin implements HasTas
             }
         }
 
+        foreach ($articleFilenames ?? [] as $filename) {
+            $linkElement = $dom->createElement('self-uri');
+            if (str_contains($filename, '.pdf')) {
+                $linkElement->setAttribute('content-type', 'pdf');
+            } elseif (str_contains($filename, '.xml')) {
+                $linkElement->setAttribute('content-type', 'xml');
+            }
+            $linkElement->setAttribute('xlink:href', $filename);
+            $uriNode = $xpath->query("//article/front/article-meta/self-uri")->item(0);
+            if ($uriNode) {
+                $uriNode->parentNode->insertBefore($linkElement, $uriNode);
+            } else {
+                $abstractNode = $xpath->query("//article/front/article-meta/abstract")->item(0);
+                $articleMetaNode = $xpath->query("//article/front/article-meta")->item(0);
+                $articleMetaNode->insertBefore($linkElement, $abstractNode);
+            }
+        }
+
         // Add the JATS 1.2 DTD declaration
+        // @todo move to JATS plugin?
         $impl = new DOMImplementation();
         $dtd = $impl->createDocumentType(
             'article',
@@ -665,7 +756,65 @@ class PubmedCentralExportPlugin extends PubObjectsExportPlugin implements HasTas
             $articleNode->setAttribute('article-type', 'research-article');
             $newJatsDoc->appendChild($newJatsDoc->importNode($articleNode, true));
         }
-
         return $newJatsDoc->saveXML();
+    }
+
+    /**
+     * Validate a JATS XML document against the DTD and the NLM style checker XSL.
+     */
+    public function validateJats(DOMDocument $importedJats): bool|array
+    {
+        // DTD Validation
+        $xmlString = $importedJats->saveXML();
+        $validatingDom = new DOMDocument();
+
+        // Enable external entity loading and validation
+        $validatingDom->resolveExternals = true;
+        $validatingDom->validateOnParse = true;
+
+        libxml_use_internal_errors(true);
+        $validatingDom->loadXML($xmlString);
+
+        if (!$validatingDom->validate()) {
+            $errors = libxml_get_errors();
+            $errorMsgs = [];
+            foreach ($errors as $error) {
+                $errorMsgs[] = "DTD Error [line $error->line]: " . trim($error->message);
+            }
+            libxml_clear_errors();
+            error_log(print_r($errorMsgs, true));
+            return $errorMsgs;
+        }
+
+        // @todo not working properly yet - may require an external xsl processor for full implementation?
+        // NLM style checker
+        $xslFile = 'plugins/generic/pubmedCentral/xsl/nlm-stylechecker.xsl';
+        $xslTransformer = new XSLTransformer();
+        $filteredXml = $xslTransformer->transform(
+            $importedJats,
+            XSLTransformer::XSL_TRANSFORMER_DOCTYPE_DOM,
+            $xslFile,
+            XSLTransformer::XSL_TRANSFORMER_DOCTYPE_FILE,
+            XSLTransformer::XSL_TRANSFORMER_DOCTYPE_DOM
+        );
+
+        // if root node is <ERR>, the style checker found issues
+        if ($filteredXml->documentElement->nodeName == 'ERR') {
+            $errors = $filteredXml->getElementsByTagName('error');
+            $warnings = $filteredXml->getElementsByTagName('warning');
+
+            //$details = [];
+            foreach ($errors as $error) {
+                error_log('Style Error: ' . $error->textContent);
+                //$details[] = 'Style Error: ' . $error->textContent;
+            }
+            foreach ($warnings as $warning) {
+                // @todo decide how to handle warnings
+                error_log('Style Warning: ' . $warning->textContent);
+            }
+            //return !empty($details) ? $details : ['Unknown style validation error.'];
+        }
+
+        return true;
     }
 }

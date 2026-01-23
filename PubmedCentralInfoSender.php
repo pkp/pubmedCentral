@@ -126,8 +126,7 @@ class PubmedCentralInfoSender extends ScheduledTask
         // @todo fix for pmc
         foreach ($objects as $object) {
             // Deposit the JSON
-            $paths = $plugin->createZip($objects, $journal);
-            $result = $plugin->depositXML($objects, $journal, $paths);
+            $result = $plugin->depositXML($objects, $journal);
             if ($result !== true) {
                 $this->addLogEntry($result);
             }

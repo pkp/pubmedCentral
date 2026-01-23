@@ -21,11 +21,11 @@
 		{assign var="allowExport" value=true}
 	{/if}
 
-	{if !$currentContext->getData('name') || !$currentContext->getData('publisher') || (!$currentContext->getData('onlineIssn') || !$currentContext->getData('printIssn'))}
-	<p>
+	{if !$currentContext->getData('publisherInstitution') || !($currentContext->getData('onlineIssn') || $currentContext->getData('printIssn'))}
+		<p>
 		{capture assign="contextSettingsUrl"}{url page="management" op="settings" path="context"}{/capture}
 		{translate key="plugins.importexport.pmc.missingFields" url=$contextSettingsUrl}
-	</p>
+		</p>
 	{else}
 
 		<script type="text/javascript">
