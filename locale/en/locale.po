@@ -47,6 +47,9 @@ msgstr ""
 msgid "plugins.importexport.pmc.export.success"
 msgstr "The export was executed successfully!"
 
+msgid "plugins.importexport.pmc.export.errors"
+msgstr "One or more of the deposits failed. The system returned errors: '{$param}'"
+
 msgid "plugins.importexport.pmc.export.failure.connection"
 msgstr "Failed to connect to the FTP server at {$host}."
 
@@ -68,7 +71,7 @@ msgstr ""
 "one PDF or XML galley file for this publication and try again."
 
 msgid "plugins.importexport.pmc.export.failure.creatingFile"
-msgstr "Failed to create zip file. The system returned an error: '{$param}'."
+msgstr "Failed to create zip file. The system returned errors: '{$param}'."
 
 msgid "plugins.importexport.pmc.export.failure.addingFile"
 msgstr "Unable to add file {$filePath} to PMC ZIP. The system returned an error: '{$param}'."
@@ -76,8 +79,8 @@ msgstr "Unable to add file {$filePath} to PMC ZIP. The system returned an error:
 msgid "plugins.importexport.pmc.export.failure.jatsValidation"
 msgstr "JATS validation failed. The system returned validation errors: '{$param}'"
 
-msgid "plugins.importexport.pmc.export.failure.jatsValidationBody"
-msgstr "JATS validation failed. No body element found."
+msgid "plugins.importexport.pmc.export.failure.jatsModification"
+msgstr "JATS modifications failed. The system returned errors: '{$param}'"
 
 msgid "plugins.importexport.pmc.settings.form.jatsImportedOnly"
 msgstr ""

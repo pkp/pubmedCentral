@@ -25,7 +25,7 @@ class PubmedCentralPlugin extends PubObjectsExportGenericPlugin
      *
      * @param null|mixed $mainContextId
      */
-    public function register($category, $path, $mainContextId = null)
+    public function register($category, $path, $mainContextId = null): bool
     {
         return parent::register($category, $path, $mainContextId);
     }

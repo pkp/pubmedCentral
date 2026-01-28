@@ -100,10 +100,13 @@ class PubmedCentralInfoSender extends ScheduledTask
         $journalFactory = $contextDao->getAll(true);
 
         $journals = [];
-        while ($journal = $journalFactory->next()) { /** @var  Journal $journal */
+        while ($journal = $journalFactory->next()) { /** @var Journal $journal */
             $journalId = $journal->getId();
+            $connectionSettings = $plugin->getConnectionSettings($journal);
             if (
-                !$plugin->getSetting($journalId, 'endpoints') ||
+                empty($connectionSettings['host']) ||
+                empty($connectionSettings['username']) ||
+                empty($connectionSettings['password']) ||
                 !$plugin->getSetting($journalId, 'automaticRegistration')
             ) {
                 continue;
@@ -126,7 +129,7 @@ class PubmedCentralInfoSender extends ScheduledTask
         // @todo fix for pmc
         foreach ($objects as $object) {
             // Deposit the JSON
-            $result = $plugin->depositXML($objects, $journal);
+            $result = $plugin->depositXML([$object], $journal);
             if ($result !== true) {
                 $this->addLogEntry($result);
             }
@@ -140,9 +143,9 @@ class PubmedCentralInfoSender extends ScheduledTask
     protected function addLogEntry(array $errors): void
     {
         foreach ($errors as $error) {
-            if (!is_array($error) || !count($error) > 0) {
+            if (!is_array($error) || count($error) === 0) {
                 throw new Exception('Invalid error message');
-            };
+            }
             $this->addExecutionLogEntry(
                 __($error[0], ['param' => $error[1] ?? null]),
                 ScheduledTaskHelper::SCHEDULED_TASK_MESSAGE_TYPE_WARNING

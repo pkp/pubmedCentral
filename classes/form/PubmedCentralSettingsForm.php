@@ -23,7 +23,7 @@ class PubmedCentralSettingsForm extends PubObjectsExportSettingsForm
     /**
      * Constructor
      */
-    public function __construct(private PubmedCentralExportPlugin $plugin, private int $contextId)
+    public function __construct(private readonly PubmedCentralExportPlugin $plugin, private readonly int $contextId)
     {
         parent::__construct($this->plugin->getTemplateResource('settingsForm.tpl'));
     }
@@ -57,7 +57,7 @@ class PubmedCentralSettingsForm extends PubObjectsExportSettingsForm
      * @param null|mixed $template
      * @throws Exception
      */
-    public function fetch($request, $template = null, $display = false)
+    public function fetch($request, $template = null, $display = false): ?string
     {
         return parent::fetch($request, $template, $display);
     }
