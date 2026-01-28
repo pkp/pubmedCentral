@@ -79,6 +79,7 @@ class PubmedCentralSettingsForm extends PubObjectsExportSettingsForm
     {
         return [
             'jatsImported' => 'bool',
+            'automaticRegistration' => 'bool',
             'nlmTitle' => 'string',
             'host' => 'string',
             'port' => 'string', // @todo check
@@ -92,6 +93,7 @@ class PubmedCentralSettingsForm extends PubObjectsExportSettingsForm
     {
         return in_array($settingName, [
             'jatsImported',
+            'automaticRegistration',
             'host',
             'port',
             'path',

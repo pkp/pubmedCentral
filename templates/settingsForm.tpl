@@ -27,6 +27,10 @@
 				{fbvElement type="checkbox" id="jatsImported" label="plugins.importexport.pmc.settings.form.jatsImportedOnly" checked=$jatsImported|compare:true}
 			{/fbvFormSection}
 
+			{fbvFormSection list="true"}
+				{fbvElement type="checkbox" id="automaticRegistration" label="plugins.importexport.pmc.settings.form.automaticRegistration.description" checked=$automaticRegistration|compare:true}
+			{/fbvFormSection}
+
 			{fbvFormSection}
 				<span class="instruct">{translate key="plugins.importexport.pmc.settings.form.nlmTitle.description"}</span>
 				<br/>

@@ -82,6 +82,12 @@ msgstr "JATS validation failed. The system returned validation errors: '{$param}
 msgid "plugins.importexport.pmc.export.failure.jatsModification"
 msgstr "JATS modifications failed. The system returned errors: '{$param}'"
 
+msgid "plugins.importexport.pmc.settings.form.automaticRegistration.description"
+msgstr ""
+"Deposit articles automatically to PubMed Central. Please note that this may "
+"take a short amount of time after publication to process (e.g. depending on "
+"your cronjob configuration)."
+
 msgid "plugins.importexport.pmc.settings.form.jatsImportedOnly"
 msgstr ""
 "Only allow exports for articles with uploaded JATS XML files. If not enabled, the plugin will use "
