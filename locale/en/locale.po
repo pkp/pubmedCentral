@@ -1,0 +1,112 @@
+msgid "plugins.importexport.pmc.displayName"
+msgstr "PubMed Central Export Plugin"
+
+msgid "plugins.importexport.pmc.description"
+msgstr ""
+"This plugin may be used to export your journal content to <a href=\"https://www.pmc.ncbi.nlm.nih.gov.org\" target=\"_blank\">PubMed Central</a>. "
+"Content can be downloaded for later delivery to PubMed Central, or sent to your account on the PubMed Central server by "
+"configuring your credentials below."
+
+msgid "plugins.importexport.pmc.description.short"
+msgstr "This plugin may be used to export your journal content to PubMed Central."
+
+msgid "plugins.importexport.pmc.ftpLibraryMissing"
+msgstr ""
+"<blockquote style=\"border: 1px solid; padding: 1em;\"><strong>⚠️ Warning:</strong> The <code>league/flysystem-ftp</code> library is missing from your server. To install it, run:\n"
+"<pre><code>composer -d lib/pkp require league/flysystem-ftp</code></pre>"
+"...or upgrade to a newer release of OJS. Until this is resolved, <strong>FTP deposits will not work</strong>. SFTP deposits can still be used.</blockquote>"
+
+msgid "plugins.importexport.pmc.missingFields"
+msgstr ""
+"This journal is missing some required information. Please go to your <a href="
+"\"{$url}\">Journal Settings</a> and ensure you have entered the publisher and ISSN."
+
+msgid "plugins.importexport.pmc.host"
+msgstr "Host"
+
+msgid "plugins.importexport.pmc.username"
+msgstr "Username"
+
+msgid "plugins.importexport.pmc.password"
+msgstr "Password"
+
+msgid "plugins.importexport.pmc.path"
+msgstr "Path"
+
+msgid "plugins.importexport.pmc.port"
+msgstr "Port (optional, defaults to 21)"
+
+msgid "plugins.importexport.pmc.endpoint"
+msgstr "Connection Details"
+
+msgid "plugins.importexport.pmc.downloadWarning"
+msgstr ""
+"When exporting multiple articles, downloaded packages should not be sent to PubMed Central. "
+" Please unzip the packages first and send the article-level zip packages to PubMed Central."
+
+msgid "plugins.importexport.pmc.export.success"
+msgstr "The export was executed successfully!"
+
+msgid "plugins.importexport.pmc.export.errors"
+msgstr "One or more of the deposits failed. The system returned errors: '{$param}'"
+
+msgid "plugins.importexport.pmc.export.failure.connection"
+msgstr "Failed to connect to the FTP server at {$host}."
+
+msgid "plugins.importexport.pmc.export.failure.credentials"
+msgstr "Failed to connect to the FTP server with the given credentials."
+
+msgid "plugins.importexport.pmc.export.failure.settings"
+msgstr "To export the issues to PubMed Central you must setup the credentials in the settings tab."
+
+msgid "plugins.importexport.pmc.export.failure.loadingIssue"
+msgstr "Failed to load the issue with ID #{$issueId}."
+
+msgid "plugins.importexport.pmc.export.failure.jatsFileNotFound"
+msgstr "No suitable JATS XML file was found for export."
+
+msgid "plugins.importexport.pmc.export.failure.multipleArticleFiles"
+msgstr ""
+"Multiple article files were found for this publication. Please ensure there is only "
+"one PDF or XML galley file for this publication and try again."
+
+msgid "plugins.importexport.pmc.export.failure.creatingFile"
+msgstr "Failed to create zip file. The system returned errors: '{$param}'."
+
+msgid "plugins.importexport.pmc.export.failure.openingFile"
+msgstr "Failed to open zip file: '{$path}'."
+
+msgid "plugins.importexport.pmc.export.failure.addingFile"
+msgstr "Unable to add file {$filePath} to PMC ZIP. The system returned an error: '{$param}'."
+
+msgid "plugins.importexport.pmc.export.failure.jatsValidation"
+msgstr "JATS validation failed. The system returned validation errors: '{$param}'"
+
+msgid "plugins.importexport.pmc.export.failure.jatsModification"
+msgstr "JATS modifications failed. The system returned errors: '{$param}'"
+
+msgid "plugins.importexport.pmc.settings.form.automaticRegistration.description"
+msgstr ""
+"Deposit articles automatically to PubMed Central. Please note that this may "
+"take a short amount of time after publication to process (e.g. depending on "
+"your cronjob configuration)."
+
+msgid "plugins.importexport.pmc.settings.form.jatsImportedOnly"
+msgstr ""
+"Only allow exports for articles with uploaded JATS XML files. If not enabled, the plugin will use "
+"system-generated JATS when no JATS XML file is present."
+
+msgid "plugins.importexport.pmc.settings.form.nlmTitle"
+msgstr "NLM Title Abbreviation"
+
+msgid "plugins.importexport.pmc.settings.form.nlmTitle.description"
+msgstr ""
+"The NLM Title Abbreviation for the journal. "
+"If you do not know the abbreviation, <a href=\"https://pmc.ncbi.nlm.nih.gov/journals/\">search the PubMed Central journals list</a>"
+" or contact PubMed Central."
+
+msgid "plugins.generic.pmc.displayName"
+msgstr "PubMed Central Plugin"
+
+msgid "plugins.generic.pmc.description"
+msgstr "Exports articles or article versions to PubMed Central."
