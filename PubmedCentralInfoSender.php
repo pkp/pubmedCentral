@@ -26,6 +26,7 @@ use PKP\scheduledTask\ScheduledTaskHelper;
 
 class PubmedCentralInfoSender extends ScheduledTask
 {
+    // @todo not currently working, may be partially due to plugin registry issue
     public PubmedCentralExportPlugin $plugin;
 
     /**
