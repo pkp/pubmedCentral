@@ -152,12 +152,20 @@ class PubmedCentralExportPlugin extends PubObjectsExportPlugin implements HasTas
                 }
                 $request->redirect(null, null, null, ['plugin', $this->getName()], null, $tab);
             } else {
+                $filename = $this->buildFileName($context, null, false, 'zip');
+                if (count($objects) == 1) {
+                    $object = array_shift($objects);
+                    $pubId = $object instanceof Submission ?
+                        $object->getCurrentPublication()->getId() :
+                        $object->getId();
+                    $filename = $this->buildFileName($context, $pubId, true, 'zip');
+                }
                 $fileManager = new FileManager();
                 $fileManager->downloadByPath(
                     $path,
                     'application/zip',
                     false,
-                    $this->buildFileName($context, null, false, 'zip')
+                    $filename
                 );
                 $fileManager->deleteByPath($path);
             }
