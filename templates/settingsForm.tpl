@@ -5,7 +5,7 @@
  * Copyright (c) 2026 John Willinsky
  * Distributed under the GNU GPL v3. For full terms see the file LICENSE.
  *
- * PubMed Central plugin settings
+ * PubMed Central plugin settings.
  *
  *}
 <script type="text/javascript">

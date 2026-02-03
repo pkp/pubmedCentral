@@ -53,14 +53,8 @@ msgstr "One or more of the deposits failed. The system returned errors: '{$param
 msgid "plugins.importexport.pmc.export.failure.connection"
 msgstr "Failed to connect to the FTP server at {$host}."
 
-msgid "plugins.importexport.pmc.export.failure.credentials"
-msgstr "Failed to connect to the FTP server with the given credentials."
-
 msgid "plugins.importexport.pmc.export.failure.settings"
 msgstr "To export the issues to PubMed Central you must setup the credentials in the settings tab."
-
-msgid "plugins.importexport.pmc.export.failure.loadingIssue"
-msgstr "Failed to load the issue with ID #{$issueId}."
 
 msgid "plugins.importexport.pmc.export.failure.jatsFileNotFound"
 msgstr "No suitable JATS XML file was found for export."

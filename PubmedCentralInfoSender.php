@@ -1,7 +1,7 @@
 <?php
 
 /**
- * @file plugins/importexport/pubmedCentral/PubmedCentralInfoSender.php
+ * @file PubmedCentralInfoSender.php
  *
  * Copyright (c) 2026 Simon Fraser University
  * Copyright (c) 2026 John Willinsky
@@ -9,7 +9,7 @@
  *
  * @class PubmedCentralInfoSender
  *
- * @brief Scheduled task to send deposits to Pubmed Central.
+ * @brief Scheduled task to send deposits to PubMed Central.
  */
 
 namespace APP\plugins\generic\pubmedCentral;
@@ -69,8 +69,6 @@ class PubmedCentralInfoSender extends ScheduledTask
         $journals = $this->getJournals();
 
         foreach ($journals as $journal) {
-            // load pubIds for this journal
-            PluginRegistry::loadCategory('pubIds', true, $journal->getId());
             if ($journal->getData(Context::SETTING_DOI_VERSIONING)) {
                 $depositablePublications = $plugin->getAllDepositablePublications($journal);
                 if (count($depositablePublications)) {

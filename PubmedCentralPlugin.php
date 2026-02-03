@@ -1,7 +1,7 @@
 <?php
 
 /**
- * @file plugins/generic/pubmedCentral/PubmedCentralPlugin.php
+ * @file PubmedCentralPlugin.php
  *
  * Copyright (c) 2026 Simon Fraser University
  * Copyright (c) 2026 John Willinsky
@@ -9,8 +9,7 @@
  *
  * @class PubmedCentralPlugin
  *
- * @brief Plugin to export articles to Pubmed Central.
- *
+ * @brief Plugin to export articles to PubMed Central.
  */
 
 namespace APP\plugins\generic\pubmedCentral;

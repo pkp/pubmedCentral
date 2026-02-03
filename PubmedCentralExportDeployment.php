@@ -1,7 +1,7 @@
 <?php
 
 /**
- * @file plugins/importexport/pubmedCentral/PubmedCentralExportDeployment.php
+ * @file PubmedCentralExportDeployment.php
  *
  * Copyright (c) 2026 Simon Fraser University
  * Copyright (c) 2026 John Willinsky
@@ -9,7 +9,7 @@
  *
  * @class PubmedCentralExportDeployment
  *
- * @brief Base class configuring the Pubmed Central export process to an
+ * @brief Base class configuring the PubMed Central export process to an
  * application's specifics.
  */
 

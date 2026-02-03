@@ -1,6 +1,6 @@
 # PubMed Central Plugin for OJS
 
-An OJS plugin for exporting articles to PubMed Central.
+An OJS plugin for exporting articles to [PubMed Central](https://pmc.ncbi.nlm.nih.gov/).
 
 ## Compatibility
 
@@ -10,16 +10,22 @@ Compatible with OJS 3.6 and later.
 
 ### For Development
 
-- Copy the plugin files to `plugins/importexport/pubmedCentral/`
-- Run the installation tool: `php lib/pkp/tools/installPluginVersion.php plugins/importexport/pubmedCentral/version.xml`
+- Copy the plugin files to `plugins/generic/pubmedCentral/`
+- Run the installation tool: `php lib/pkp/tools/installPluginVersion.php plugins/generic/pubmedCentral/version.xml`
 
 ## Using the Plugin
 
-Articles to export to PubMed Central must meet the following requirements:
+Before using this plugin, your journal should be approved for deposit by PubMed Central.
 
-- Have a compatible JATS XML file in OJS for the article.
-- Contain uncompressed image files, if applicable.
-- All image and supplementary files must be referenced in the JATS XML.
+To use the plugin, ensure that your journal has entered a publisher and at least one ISSN in the journal settings.
+
+Within the plugin settings, you will need to enter the PubMed Central FTP connection details and your journal's
+NLM Title Abbreviation.
+
+Articles to export to PubMed Central should meet the following requirements:
+
+- Have a valid JATS XML file in OJS, or generate valid JATS (1.2) in OJS via the JATS Template plugin.
+- Contain high-resolution image files, if applicable.
 
 ## License
 

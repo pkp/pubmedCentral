@@ -1,7 +1,7 @@
 <?php
 
 /**
- * @file PubmedCentralSettingsForm.php
+ * @file classes/form/PubmedCentralSettingsForm.php
  *
  * Copyright (c) 2026 Simon Fraser University
  * Copyright (c) 2026 John Willinsky
@@ -82,7 +82,7 @@ class PubmedCentralSettingsForm extends PubObjectsExportSettingsForm
             'automaticRegistration' => 'bool',
             'nlmTitle' => 'string',
             'host' => 'string',
-            'port' => 'string', // @todo check
+            'port' => 'string',
             'path' => 'string',
             'username' => 'string',
             'password' => 'string'
