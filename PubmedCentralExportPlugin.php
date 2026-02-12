@@ -194,7 +194,7 @@ class PubmedCentralExportPlugin extends PubObjectsExportPlugin implements HasTas
         $context,
         $noValidation = null,
         &$outputErrors = null,
-        ?array $articleFilenames = null,
+        ?string $articlePdfFilename = null,
         $genres = null,
         ?string $nlmTitle = null
     ): array|string {
@@ -236,13 +236,13 @@ class PubmedCentralExportPlugin extends PubObjectsExportPlugin implements HasTas
 
         // If the JATS document is system-generated, modify it to ensure it meets PMC requirements.
         if ($document->isDefaultContent) {
-            $modifiedXml = $this->modifyDefaultJats($xml, $submissionId, $articleFilenames, $nlmTitle);
-            if (is_array($modifiedXml)) {
-                return $modifiedXml;
-            }
-            $returnXml = $modifiedXml;
+            $returnXml = $this->modifyDefaultJats($xml, $submissionId, $articlePdfFilename, $nlmTitle);
         } else {
-            $returnXml = $this->modifyCustomJats($xml, $articleFilenames);
+            $returnXml = $this->modifyCustomJats($xml, $articlePdfFilename);
+        }
+
+        if (is_array($returnXml)) {
+            return $returnXml;
         }
 
         // Validate the XML document.
@@ -394,13 +394,20 @@ class PubmedCentralExportPlugin extends PubObjectsExportPlugin implements HasTas
         }
 
         $publication = $object instanceof Submission ? $object->getCurrentPublication() : $object;
+        $locale = $object->getData('locale');
         $filename = $this->buildFileName($nlmTitle, $object);
 
-        // Add an article galley file
-        $articleFilenames = [];
+        // Add a PDF article galley file
+        $pdfFilesFound = 0;
+        $articlePdfFilename = null;
         foreach ($publication->getData('galleys') ?? [] as $galley) { /** @var Galley $galley */
             // Ignore remote galleys
             if ($galley->getData('urlRemote')) {
+                continue;
+            }
+
+            // Ignore galleys with locales other than the submission locale
+            if ($galley->getData('locale') !== $locale) {
                 continue;
             }
 
@@ -412,35 +419,40 @@ class PubmedCentralExportPlugin extends PubObjectsExportPlugin implements HasTas
             }
 
             $genre = $genreDao->getById($galleyFile->getData('genreId'));
-            if (
-                $genre->getCategory() == Genre::GENRE_CATEGORY_DOCUMENT &&
+
+            $isPrimaryDocument =
+                ($genre->getCategory() == Genre::GENRE_CATEGORY_DOCUMENT) &&
                 !$genre->getSupplementary() &&
-                !$genre->getDependent()
-            ) {
-                $galleyPath = $fileService->get($galleyFile->getData('fileId'))->path;
-                $extension = pathinfo($galleyPath, PATHINFO_EXTENSION);
-                $galleyFilename = $this->buildFileName($nlmTitle, $object, false, $extension);
-                $galleyFilePath = $filename . '/' . $galleyFilename;
-                $articleFilenames[] = $galleyFilename;
-                // @todo make sure files meet 2GB max size requirement?
+                !$genre->getDependent();
 
-                if (
-                    !$zip->addFromString(
-                        $galleyFilePath,
-                        $fileService->fs->read($galleyPath)
-                    )
-                ) {
-                    return ['error' => ['plugins.importexport.pmc.export.failure.addingFile', $zip->getStatusString()]];
-                }
+            if (!$isPrimaryDocument) {
+                continue;
             }
-        }
 
-        if (count($articleFilenames) > 1) {
-            return ['error' => ['plugins.importexport.pmc.export.failure.multipleArticleFiles']];
+            // @todo make sure files meet 2GB max size requirement?
+            $galleyPath = $fileService->get($galleyFile->getData('fileId'))->path;
+            $extension = pathinfo($galleyPath, PATHINFO_EXTENSION);
+            $galleyFilename = $this->buildFileName($nlmTitle, $object, false, $extension);
+            $galleyFilePath = $filename . '/' . $galleyFilename;
+            $articlePdfFilename = $galleyFilename;
+
+            if ($pdfFilesFound > 0) {
+                return ['error' => ['plugins.importexport.pmc.export.failure.multipleArticleFiles']];
+            }
+
+            if (
+                !$zip->addFromString(
+                    $galleyFilePath,
+                    $fileService->fs->read($galleyPath)
+                )
+            ) {
+                return ['error' => ['plugins.importexport.pmc.export.failure.addingFile', $zip->getStatusString()]];
+            }
+            $pdfFilesFound++;
         }
 
         // Add article XML to zip
-        $document = $this->exportXML($object, null, $context, null, $exportErrors, $articleFilenames, $genres, $nlmTitle);
+        $document = $this->exportXML($object, null, $context, null, $exportErrors, $articlePdfFilename, $genres, $nlmTitle);
         if (is_array($document)) {
             return ['error' => $document];
         } else {
@@ -621,7 +633,7 @@ class PubmedCentralExportPlugin extends PubObjectsExportPlugin implements HasTas
     protected function modifyDefaultJats(
         string $importedJats,
         int $submissionId,
-        ?array $articleFilenames,
+        ?string $articlePdfFilename,
         string $nlmTitle
     ): string|array {
         $dom = new DOMDocument();
@@ -728,14 +740,19 @@ class PubmedCentralExportPlugin extends PubObjectsExportPlugin implements HasTas
             }
         }
 
-        foreach ($articleFilenames ?? [] as $filename) {
+        // Remove any existing self-uri PDF links
+        $selfUriPdfNodes = $xpath->query(
+            "self-uri[@content-type='pdf' or @content-type='application/pdf']",
+            $articleMetaNode
+        );
+        foreach ($selfUriPdfNodes as $selfUriPdfNode) {
+            $selfUriPdfNode->parentNode->removeChild($selfUriPdfNode);
+        }
+
+        if ($articlePdfFilename) {
             $linkElement = $dom->createElement('self-uri');
-            if (str_ends_with(strtolower($filename), '.pdf')) {
-                $linkElement->setAttribute('content-type', 'pdf');
-            } elseif (str_ends_with(strtolower($filename), '.xml')) {
-                $linkElement->setAttribute('content-type', 'xml');
-            }
-            $linkElement->setAttribute('xlink:href', $filename);
+            $linkElement->setAttribute('content-type', 'pdf');
+            $linkElement->setAttribute('xlink:href', $articlePdfFilename);
             $uriNode = $xpath->query("self-uri", $articleMetaNode)->item(0);
             if ($uriNode) {
                 $uriNode->parentNode->insertBefore($linkElement, $uriNode);
@@ -772,7 +789,7 @@ class PubmedCentralExportPlugin extends PubObjectsExportPlugin implements HasTas
      */
     protected function modifyCustomJats(
         string $importedJats,
-        array $articleFilenames
+        ?string $articlePdfFilename
     ): string|array {
         $dom = new DOMDocument();
         $dom->preserveWhiteSpace = false;
@@ -787,14 +804,19 @@ class PubmedCentralExportPlugin extends PubObjectsExportPlugin implements HasTas
             return ['plugins.importexport.pmc.export.failure.jatsNodeMissing', 'article-meta'];
         }
 
-        foreach ($articleFilenames ?? [] as $filename) {
+        // Remove any existing self-uri PDF links
+        $selfUriPdfNodes = $xpath->query(
+            "self-uri[@content-type='pdf' or @content-type='application/pdf']",
+            $articleMetaNode
+        );
+        foreach ($selfUriPdfNodes as $selfUriPdfNode) {
+            $selfUriPdfNode->parentNode->removeChild($selfUriPdfNode);
+        }
+
+        if ($articlePdfFilename) {
             $linkElement = $dom->createElement('self-uri');
-            if (str_ends_with(strtolower($filename), '.pdf')) {
-                $linkElement->setAttribute('content-type', 'pdf');
-            } elseif (str_ends_with(strtolower($filename), '.xml')) {
-                $linkElement->setAttribute('content-type', 'xml');
-            }
-            $linkElement->setAttribute('xlink:href', $filename);
+            $linkElement->setAttribute('content-type', 'pdf');
+            $linkElement->setAttribute('xlink:href', $articlePdfFilename);
             $uriNode = $xpath->query("self-uri", $articleMetaNode)->item(0);
             if ($uriNode) {
                 $uriNode->parentNode->insertBefore($linkElement, $uriNode);
