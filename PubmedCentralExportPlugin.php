@@ -14,7 +14,6 @@
 namespace APP\plugins\generic\pubmedCentral;
 
 use APP\facades\Repo;
-use APP\journal\Journal;
 use APP\notification\NotificationManager;
 use APP\plugins\generic\pubmedCentral\classes\form\PubmedCentralSettingsForm;
 use APP\plugins\PubObjectsExportPlugin;
@@ -180,13 +179,7 @@ class PubmedCentralExportPlugin extends PubObjectsExportPlugin implements HasTas
     /**
      * Get the XML for selected objects.
      *
-     * @param Submission|Publication $object single published submission or publication
-     * @param string $filter
-     * @param Journal $context
-     * @param bool $noValidation If set to true, no XML validation will be done
-     * @param null|mixed $outputErrors
-     *
-     * @return string|array XML document or array of error messages.
+     * @return array|string array of error message, or XML document.
      */
     public function exportXML(
         $object,
@@ -360,7 +353,9 @@ class PubmedCentralExportPlugin extends PubObjectsExportPlugin implements HasTas
                         error_log('Failed to delete zip file after deposit: ' . $packagedObject['path']);
                     }
                 } else {
-                    $errorMessage = $this->convertErrorMessage(['plugins.importexport.pmc.export.failure.openingFile', $packagedObject['path']]);
+                    $errorMessage = $this->convertErrorMessage(
+                        ['plugins.importexport.pmc.export.failure.openingFile', $packagedObject['path']]
+                    );
                     $this->updateStatus($object, PubObjectsExportPlugin::EXPORT_STATUS_ERROR, $errorMessage);
                     $errors = true;
                 }
@@ -375,7 +370,7 @@ class PubmedCentralExportPlugin extends PubObjectsExportPlugin implements HasTas
     }
 
     /**
-     * Creates a zip file with the given publications.
+     * Create a zip file with the given publications.
      *
      * @return array the paths of the created zip files and any error messages.
      */
@@ -451,7 +446,7 @@ class PubmedCentralExportPlugin extends PubObjectsExportPlugin implements HasTas
             $pdfFilesFound++;
         }
 
-        // Add article XML to zip
+        // Add article XML to the zip
         $document = $this->exportXML($object, null, $context, null, $exportErrors, $articlePdfFilename, $genres, $nlmTitle);
         if (is_array($document)) {
             return ['error' => $document];
@@ -468,7 +463,7 @@ class PubmedCentralExportPlugin extends PubObjectsExportPlugin implements HasTas
     }
 
     /**
-     * Creates a zip file of collected objects for download.
+     * Create a zip file of collected objects for download.
      *
      * @return array the path of the created zip file or error details, if applicable.
      */
@@ -497,7 +492,10 @@ class PubmedCentralExportPlugin extends PubObjectsExportPlugin implements HasTas
             }
             if (!$finalZip->addFile($zipPackage['path'], $zipPackage['filename'] . '.zip')) {
                 unlink($zipPackage['path']);
-                return ['error' => ['plugins.importexport.pmc.export.failure.creatingFile', $finalZip->getStatusString()]];
+                return ['error' => [
+                    'plugins.importexport.pmc.export.failure.creatingFile',
+                    $finalZip->getStatusString()]
+                ];
             }
             $createdPaths[] = $zipPackage['path'];
         }

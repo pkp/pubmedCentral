@@ -27,6 +27,16 @@ Articles to export to PubMed Central should meet the following requirements:
 - Have a valid JATS XML file in OJS, or generate valid JATS (1.2) in OJS via the JATS Template plugin.
 - Contain high-resolution image files, if applicable.
 
+All JATS XML will be validated against its DTD and
+[the PubMed Central Style Checker](https://pmc.ncbi.nlm.nih.gov/tools/stylechecker/) prior to export.
+
+Exported packages will also include a PDF galley of the article if one is available in the submission's primary language.
+The plugin will add a link to the PDF in the JATS XML prior to export.
+
+### DOI Versioning
+
+If DOI versioning is enabled in OJS, then the user can deposit each major version of an article to PubMed Central.
+
 ## License
 
 This plugin is licensed under the GNU General Public License v3.
