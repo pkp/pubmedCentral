@@ -688,10 +688,12 @@ class PubmedCentralExportPlugin extends PubObjectsExportPlugin implements HasTas
         $pubDateNode = $xpath->query("pub-date[@publication-format='epub']", $articleMetaNode)->item(0);
         $pubDateNode?->setAttribute('publication-format', 'electronic');
 
-        // set author contrib-type on contrib nodes
-        $articleContribNodes = $xpath->query("contrib-group/contrib", $articleMetaNode);
-        foreach ($articleContribNodes as $node) {
-            $node->setAttribute('contrib-type', 'author');
+        $articleContribNodes = $xpath->query(
+            "contrib-group/contrib[not(@contrib-type='author' or contrib-type='editor')]",
+            $articleMetaNode
+        );
+        foreach ($articleContribNodes as $node) { /** @var DOMNode $node **/
+            $node->parentNode->removeChild($node);
         }
 
         // move name out of name-alternatives if only one name is present for a contrib
