@@ -111,7 +111,7 @@ class PubmedCentralExportPlugin extends PubObjectsExportPlugin implements HasTas
         $context = $request->getContext();
         if ($request->getUserVar(PubObjectsExportPlugin::EXPORT_ACTION_DEPOSIT)) {
             $resultErrors = [];
-            $result = $this->depositXML($objects, $context);
+            $result = $this->depositXML($objects, $context, $noValidation);
             if (is_array($result)) {
                 $resultErrors[] = $result;
             }
@@ -138,7 +138,7 @@ class PubmedCentralExportPlugin extends PubObjectsExportPlugin implements HasTas
             // Redirect back to the right tab
             $request->redirect(null, null, null, ['plugin', $this->getName()], null, $tab);
         } elseif ($request->getUserVar(PubObjectsExportPlugin::EXPORT_ACTION_EXPORT)) {
-            $path = $this->createZipCollection($objects, $context);
+            $path = $this->createZipCollection($objects, $context, $noValidation);
             if (!empty($path['error'])) {
                 $this->_sendNotification(
                     $request->getUser(),
@@ -241,9 +241,11 @@ class PubmedCentralExportPlugin extends PubObjectsExportPlugin implements HasTas
         // Validate the XML document.
         $dom = new DOMDocument();
         $dom->loadXML($returnXml);
-        $validation = $this->validateJats($dom);
-        if (is_string($validation)) {
-            return ['plugins.importexport.pmc.export.failure.jatsValidation', $validation];
+        if (!$noValidation) {
+            $validation = $this->validateJats($dom);
+            if (is_string($validation)) {
+                return ['plugins.importexport.pmc.export.failure.jatsValidation', $validation];
+            }
         }
         return $returnXml;
     }
@@ -302,7 +304,7 @@ class PubmedCentralExportPlugin extends PubObjectsExportPlugin implements HasTas
      *
      * @return bool|array True if the deposit was successful, or an array of error messages.
      */
-    public function depositXML($objects, $context, $filename = null): bool|array
+    public function depositXML($objects, $context, $filename = null, ?bool $noValidation = null): bool|array
     {
         // Verify that the credentials are complete
         $settings = $this->getConnectionSettings($context);
@@ -326,7 +328,7 @@ class PubmedCentralExportPlugin extends PubObjectsExportPlugin implements HasTas
         $errors = false;
 
         foreach ($objects as $object) {
-            $packagedObject = $this->createZip($object, $context);
+            $packagedObject = $this->createZip($object, $context, $noValidation);
             if (array_key_exists('error', $packagedObject)) {
                 $errorMessage = $this->convertErrorMessage($packagedObject['error']);
                 $this->updateStatus($object, PubObjectsExportPlugin::EXPORT_STATUS_ERROR, $errorMessage);
@@ -374,7 +376,7 @@ class PubmedCentralExportPlugin extends PubObjectsExportPlugin implements HasTas
      *
      * @return array the paths of the created zip files and any error messages.
      */
-    public function createZip(Submission|Publication $object, Context $context): array
+    public function createZip(Submission|Publication $object, Context $context, ?bool $noValidation = null): array
     {
         $zipDetails = [];
         $fileService = app()->get('file');
@@ -447,7 +449,7 @@ class PubmedCentralExportPlugin extends PubObjectsExportPlugin implements HasTas
         }
 
         // Add article XML to the zip
-        $document = $this->exportXML($object, null, $context, null, $exportErrors, $articlePdfFilename, $genres, $nlmTitle);
+        $document = $this->exportXML($object, null, $context, $noValidation, $exportErrors, $articlePdfFilename, $genres, $nlmTitle);
         if (is_array($document)) {
             return ['error' => $document];
         } else {
@@ -467,7 +469,7 @@ class PubmedCentralExportPlugin extends PubObjectsExportPlugin implements HasTas
      *
      * @return array the path of the created zip file or error details, if applicable.
      */
-    private function createZipCollection(array $objects, Context $context): array
+    private function createZipCollection(array $objects, Context $context, ?bool $noValidation = null): array
     {
         $finalZipPath = tempnam(sys_get_temp_dir(), 'PubmedCentralExport_');
         $finalZip = new ZipArchive();
@@ -477,7 +479,7 @@ class PubmedCentralExportPlugin extends PubObjectsExportPlugin implements HasTas
 
         $createdPaths = [];
         foreach ($objects as $object) {
-            $zipPackage = $this->createZip($object, $context);
+            $zipPackage = $this->createZip($object, $context, $noValidation);
             if (empty($zipPackage['path']) || empty($zipPackage['filename'])) {
                 $submissionId = $object instanceof Publication ? $object->getData('submissionId') : $object->getId();
                 $versionString = $object instanceof Publication ?
