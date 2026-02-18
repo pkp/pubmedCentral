@@ -682,6 +682,11 @@ class PubmedCentralExportPlugin extends PubObjectsExportPlugin implements HasTas
             $node->parentNode->removeChild($node);
         }
 
+        // If the journal-meta contrib-group is now empty, remove it
+        foreach ($xpath->query('//contrib-group[not(*) and not(normalize-space())]', $journalMetaNode) as $node) {
+            $node->parentNode->removeChild($node);
+        }
+
         if (!$articleMetaNode = $xpath->query("//article/front/article-meta")->item(0)) {
             return ['plugins.importexport.pmc.export.failure.jatsNodeMissing', 'article-meta'];
         }
@@ -695,6 +700,11 @@ class PubmedCentralExportPlugin extends PubObjectsExportPlugin implements HasTas
             $articleMetaNode
         );
         foreach ($articleContribNodes as $node) { /** @var DOMNode $node **/
+            $node->parentNode->removeChild($node);
+        }
+
+        // If the article-meta contrib-group is now empty, remove it
+        foreach ($xpath->query('//contrib-group[not(*) and not(normalize-space())]', $articleMetaNode) as $node) {
             $node->parentNode->removeChild($node);
         }
 
@@ -766,6 +776,16 @@ class PubmedCentralExportPlugin extends PubObjectsExportPlugin implements HasTas
             }
         }
 
+        // Remove any empty <p> tags, e.g. from line breaks
+        foreach ($xpath->query('//p[not(*) and not(normalize-space())]') as $node) {
+            $node->parentNode->removeChild($node);
+        }
+
+        // Remove empty <back> element (@todo temporary fix)
+        foreach ($xpath->query('//back[not(*) and not(normalize-space())]') as $node) {
+            $node->parentNode->removeChild($node);
+        }
+
         // Add the JATS 1.2 DTD declaration
         // @todo move to JATS plugin?
         $impl = new DOMImplementation();
@@ -828,6 +848,11 @@ class PubmedCentralExportPlugin extends PubObjectsExportPlugin implements HasTas
                 }
                 $articleMetaNode->insertBefore($linkElement, $abstractNode);
             }
+        }
+
+        // Remove any empty p tags, e.g. from line breaks
+        foreach ($xpath->query('//p[not(*) and not(normalize-space())]') as $node) {
+            $node->parentNode->removeChild($node);
         }
 
         return $dom->saveXML();
