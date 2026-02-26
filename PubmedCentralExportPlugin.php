@@ -710,8 +710,13 @@ class PubmedCentralExportPlugin extends PubObjectsExportPlugin implements HasTas
 
         // move name out of name-alternatives if only one name is present for a contrib
         // as name-alternatives must contain more than 1 child element for PMC
+        // and remove string-name due to PMC errors
         $nameAlternativesNodes = $xpath->query("contrib-group/contrib/name-alternatives", $articleMetaNode);
         foreach ($nameAlternativesNodes as $node) { /** @var DOMNode $node **/
+            $stringNameNode = $xpath->query('./string-name', $node);
+            if ($stringNameNode->length === 1) {
+                $node->removeChild($stringNameNode->item(0));
+            }
             $names = $xpath->query('./name', $node);
             if ($names->length > 1) {
                 continue;
