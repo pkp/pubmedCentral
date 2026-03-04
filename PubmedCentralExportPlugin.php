@@ -22,7 +22,6 @@ use APP\submission\Submission;
 use APP\template\TemplateManager;
 use DOMDocument;
 use DOMElement;
-use DOMImplementation;
 use DOMNode;
 use DOMXPath;
 use Exception;
@@ -45,10 +44,6 @@ use ZipArchive;
 
 class PubmedCentralExportPlugin extends PubObjectsExportPlugin implements HasTaskScheduler
 {
-    public const JATS_PUBLIC_ID = '-//NLM//DTD JATS (Z39.96) Journal Publishing DTD v1.2 20190208//EN';
-    public const JATS_SYSTEM_ID = 'http://jats.nlm.nih.gov/publishing/1.2/JATS-journalpublishing1.dtd';
-    public const JATS_VERSION = '1.2';
-
     /**
      * @copydoc ImportExportPlugin::display()
      */
@@ -786,29 +781,13 @@ class PubmedCentralExportPlugin extends PubObjectsExportPlugin implements HasTas
             $node->parentNode->removeChild($node);
         }
 
-        // Remove empty <back> element (@todo temporary fix)
-        foreach ($xpath->query('//back[not(*) and not(normalize-space())]') as $node) {
-            $node->parentNode->removeChild($node);
-        }
-
-        // Add the JATS 1.2 DTD declaration
-        // @todo move to JATS plugin?
-        $impl = new DOMImplementation();
-        $dtd = $impl->createDocumentType(
-            'article',
-            self::JATS_PUBLIC_ID,
-            self::JATS_SYSTEM_ID
-        );
-        $newJatsDoc = $impl->createDocument(null, '', $dtd);
-        $newJatsDoc->encoding = 'UTF-8';
-
+        // Add the article-type to the article element
         $articleNode = $dom->documentElement;
         if ($articleNode instanceof DOMElement) {
-            $articleNode->setAttribute('dtd-version', self::JATS_VERSION);
             $articleNode->setAttribute('article-type', 'research-article');
-            $newJatsDoc->appendChild($newJatsDoc->importNode($articleNode, true));
         }
-        return $newJatsDoc->saveXML();
+
+        return $dom->saveXML();
     }
 
     /**
