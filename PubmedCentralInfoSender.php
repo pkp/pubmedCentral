@@ -94,18 +94,18 @@ class PubmedCentralInfoSender extends ScheduledTask
     protected function getJournals(): array
     {
         $plugin = $this->plugin;
+        // The "enabled" setting belongs to the generic plugin
+        PluginRegistry::loadCategory('generic');
+        $genericPlugin = PluginRegistry::getPlugin('generic', 'pubmedcentralplugin');
         $contextDao = Application::getContextDAO();
         $journalFactory = $contextDao->getAll(true);
 
         $journals = [];
         while ($journal = $journalFactory->next()) { /** @var Journal $journal */
             $journalId = $journal->getId();
-            $connectionSettings = $plugin->getConnectionSettings($journal);
             if (
-                empty($connectionSettings['host']) ||
-                empty($connectionSettings['username']) ||
-                empty($connectionSettings['password']) ||
-                !$plugin->getSetting($journalId, 'enabled') ||
+                !$genericPlugin?->getEnabled($journalId) ||
+                !$plugin->hasCompleteConnectionSettings($journalId) ||
                 !$plugin->getSetting($journalId, 'nlmTitle') ||
                 !$plugin->getSetting($journalId, 'automaticRegistration')
             ) {

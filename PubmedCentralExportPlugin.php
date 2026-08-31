@@ -16,6 +16,7 @@ namespace APP\plugins\generic\pubmedCentral;
 use APP\facades\Repo;
 use APP\notification\NotificationManager;
 use APP\plugins\generic\pubmedCentral\classes\form\PubmedCentralSettingsForm;
+use APP\plugins\generic\pubmedCentral\jobs\PubmedCentralDeliver;
 use APP\plugins\PubObjectsExportPlugin;
 use APP\publication\Publication;
 use APP\submission\Submission;
@@ -40,7 +41,6 @@ use PKP\scheduledTask\PKPScheduler;
 use PKP\submission\Genre;
 use PKP\submission\GenreDAO;
 use PKP\xslt\XSLTransformer;
-use Throwable;
 use ZipArchive;
 
 class PubmedCentralExportPlugin extends PubObjectsExportPlugin implements HasTaskScheduler
@@ -92,7 +92,10 @@ class PubmedCentralExportPlugin extends PubObjectsExportPlugin implements HasTas
      * Create a filename for files created in the plugin, removing any invalid characters.
      * The naming scheme is determined by the journal's "namingType" setting:
      *  - volumeIssue: nlmTitle-volume-issue-firstPage(-timestamp)
-     *  - articleNumber: nlmTitle-articleNumber(-timestamp)
+     *  - articleNumber: nlmTitle-collectionYear-articleNumber(-timestamp)
+     *
+     * PMC organizes its archive by volume, so where a journal publishes by article
+     * number and carries no volumes, the collection year takes the volume's place.
      *
      * @param bool $ts Whether to include a timestamp in the filename.
      * @param string|null $fileExtension The optional file extension to include in the filename.
@@ -110,6 +113,7 @@ class PubmedCentralExportPlugin extends PubObjectsExportPlugin implements HasTas
         if ($publication) {
             $namingType = $this->getSetting($context->getId(), 'namingType') ?: 'volumeIssue';
             if ($namingType === 'articleNumber') {
+                $parts[] = $this->collectionYear($object);
                 $parts[] = $publication->getData('articleNumber');
             } else {
                 $issue = Repo::issue()->get($publication->getIssueId());
@@ -129,7 +133,42 @@ class PubmedCentralExportPlugin extends PubObjectsExportPlugin implements HasTas
             $parts
         );
 
-        return strtolower(implode('-', $parts) . ($fileExtension ? '.' . $fileExtension : ''));
+        return strtolower(
+            implode('-', array_filter($parts, fn ($part) => $part !== ''))
+            . ($fileExtension ? '.' . $fileExtension : '')
+        );
+    }
+
+    /**
+     * The four-digit year of the collection an article belongs to.
+     *
+     * An article stays in the collection it was first published in, even when a later
+     * version is published in another year, so the year is taken from the issue, and
+     * from the first published version of the submission where there is no issue.
+     */
+    protected function collectionYear(Submission|Publication|null $object): ?string
+    {
+        $publication = $object instanceof Submission ? $object->getCurrentPublication() : $object;
+        if (!$publication) {
+            return null;
+        }
+
+        $issueId = $publication->getIssueId();
+        $issue = $issueId ? Repo::issue()->get($issueId) : null;
+        $datePublished = $issue?->getDatePublished();
+
+        if (!$datePublished) {
+            $submissionId = (int) $publication->getData('submissionId');
+            $submission = $object instanceof Submission
+                ? $object
+                : ($submissionId ? Repo::submission()->get($submissionId) : null);
+            $datePublished = $submission?->getOriginalPublication()?->getData('datePublished')
+                ?? $publication->getData('datePublished');
+        }
+
+        $timestamp = $datePublished ? strtotime($datePublished) : false;
+
+        return $timestamp ? date('Y', $timestamp) : null;
     }
 
     /**
@@ -149,7 +188,7 @@ class PubmedCentralExportPlugin extends PubObjectsExportPlugin implements HasTas
         $context = $request->getContext();
         if ($this->_checkForExportAction(PubObjectsExportPlugin::EXPORT_ACTION_DEPOSIT)) {
             $resultErrors = [];
-            $result = $this->depositXML($objects, $context, $noValidation);
+            $result = $this->depositXML($objects, $context, null, $noValidation);
             if (is_array($result)) {
                 $resultErrors[] = $result;
             }
@@ -173,7 +212,6 @@ class PubmedCentralExportPlugin extends PubObjectsExportPlugin implements HasTas
                     );
                 }
             }
-            $this->sendValidationWarnings($request);
 
             // Redirect back to the right tab
             $request->redirect(null, null, null, ['plugin', $this->getName()], null, $tab);
@@ -276,7 +314,12 @@ class PubmedCentralExportPlugin extends PubObjectsExportPlugin implements HasTas
 
         // If the JATS document is system-generated, modify it to ensure it meets PMC requirements.
         if ($document->isDefaultContent) {
-            $returnXml = $this->modifyDefaultJats($xml, $articlePdfFilename, $nlmTitle);
+            $returnXml = $this->modifyDefaultJats(
+                $xml,
+                $articlePdfFilename,
+                $nlmTitle,
+                $this->collectionYear($object)
+            );
         } else {
             $returnXml = $this->modifyCustomJats($xml, $articlePdfFilename);
         }
@@ -310,7 +353,6 @@ class PubmedCentralExportPlugin extends PubObjectsExportPlugin implements HasTas
      */
     public function getObjectAdditionalSettings(): array
     {
-        // @todo store last export date/timestamp?
         return array_merge(parent::getObjectAdditionalSettings(), [
             $this->getDepositStatusSettingName()
         ]);
@@ -347,73 +389,85 @@ class PubmedCentralExportPlugin extends PubObjectsExportPlugin implements HasTas
     }
 
     /**
-     * Exports a zip file with the selected articles to the configured PMC account.
+     * Whether the FTP account has everything required to deposit to it.
+     */
+    public function hasCompleteConnectionSettings(int $contextId): bool
+    {
+        return $this->isAccountComplete([
+            'host' => $this->getSetting($contextId, 'host'),
+            'username' => $this->getSetting($contextId, 'username'),
+            'password' => $this->getSetting($contextId, 'password'),
+        ]);
+    }
+
+    /**
+     * Whether an FTP account (host/username/password) is fully filled in. The account
+     * is optional -- a journal may use the plugin for Export only and deliver packages
+     * to PMC by hand -- but if any of the three is set, all three must be.
+     */
+    public function isAccountComplete(array $account): bool
+    {
+        return !empty($account['host']) && !empty($account['username']) && !empty($account['password']);
+    }
+
+    /**
+     * Queue a delivery job per selected object, so that building the package and
+     * uploading it cannot block the request that triggered the deposit.
      *
-     * @return bool|array True if the deposit was successful, or an array of error messages.
+     * @copydoc PubObjectsExportPlugin::depositXML()
+     *
+     * @param Submission[]|Publication[] $objects
+     * @param null|mixed $filename
+     *
+     * @return bool|array True once the deliveries are queued, or an array of error message details.
      */
     public function depositXML($objects, $context, $filename = null, ?bool $noValidation = null): bool|array
     {
-        // Verify that the credentials are complete
-        $settings = $this->getConnectionSettings($context);
-        if (
-            empty($settings['host']) ||
-            empty($settings['username']) ||
-            empty($settings['password'])
-        ) {
+        if (!$this->hasCompleteConnectionSettings($context->getId())) {
             return ['plugins.importexport.pmc.export.failure.settings'];
         }
 
-        // Perform the deposit
-        $adapter = new FtpAdapter(FtpConnectionOptions::fromArray([
-                'host' => $settings['host'],
-                'port' => (int)$settings['port'] ?: 21,
-                'username' => $settings['username'],
-                'password' => $settings['password'],
-                'root' => $settings['path'],
-            ]));
-        $fs = new Filesystem($adapter);
-        $errors = false;
-
         foreach ($objects as $object) {
-            $packagedObject = $this->createZip($object, $context, $noValidation);
-            if (array_key_exists('error', $packagedObject)) {
-                $errorMessage = $this->convertErrorMessage($packagedObject['error']);
-                $this->updateStatus($object, PubObjectsExportPlugin::EXPORT_STATUS_ERROR, $errorMessage);
-                $errors = true;
-            } else {
-                $fp = fopen($packagedObject['path'], 'r');
-                if ($fp) {
-                    try {
-                        $fs->writeStream($packagedObject['filename'] . '.zip', $fp);
-                        // Mark the object as registered.
-                        $this->updateStatus($object, PubObjectsExportPlugin::EXPORT_STATUS_REGISTERED);
-                    } catch (Throwable $e) {
-                        $this->updateStatus(
-                            $object,
-                            PubObjectsExportPlugin::EXPORT_STATUS_ERROR,
-                            $e->getMessage()
-                        );
-                        $errors = true;
-                    } finally {
-                        fclose($fp);
-                        $this->deleteTempFile($packagedObject['path']);
-                    }
-                } else {
-                    $errorMessage = $this->convertErrorMessage(
-                        ['plugins.importexport.pmc.export.failure.openingFile', $packagedObject['path']]
-                    );
-                    $this->updateStatus($object, PubObjectsExportPlugin::EXPORT_STATUS_ERROR, $errorMessage);
-                    $this->deleteTempFile($packagedObject['path']);
-                    $errors = true;
-                }
-            }
-        }
-
-        if ($errors) {
-            return ['plugins.importexport.pmc.export.errors'];
+            dispatch(new PubmedCentralDeliver(
+                $object->getId(),
+                $object instanceof Publication,
+                $context->getId(),
+                $noValidation
+            ));
+            $this->updateStatus($object, PubObjectsExportPlugin::EXPORT_STATUS_SUBMITTED);
         }
 
         return true;
+    }
+
+    /**
+     * Write a package to the configured PMC FTP account.
+     *
+     * @throws Exception If the package cannot be read, or the upload fails.
+     */
+    public function deliverToEndpoint(string $path, string $filename, Context $context): void
+    {
+        $settings = $this->getConnectionSettings($context);
+        $adapter = new FtpAdapter(FtpConnectionOptions::fromArray([
+            'host' => $settings['host'],
+            'port' => (int) $settings['port'] ?: 21,
+            'username' => $settings['username'],
+            'password' => $settings['password'],
+            'root' => $settings['path'],
+        ]));
+
+        $fp = fopen($path, 'r');
+        if (!$fp) {
+            throw new Exception(
+                $this->convertErrorMessage(['plugins.importexport.pmc.export.failure.openingFile', $path])
+            );
+        }
+
+        try {
+            (new Filesystem($adapter))->writeStream($filename, $fp);
+        } finally {
+            fclose($fp);
+        }
     }
 
     /**
@@ -524,7 +578,16 @@ class PubmedCentralExportPlugin extends PubObjectsExportPlugin implements HasTas
         // references a file that was not uploaded.
 
         // Add article XML to the zip
-        $document = $this->exportXML($object, null, $context, $noValidation, $exportErrors, $articlePdfFilename, $genres, $nlmTitle);
+        $document = $this->exportXML(
+            $object,
+            null,
+            $context,
+            $noValidation,
+            $exportErrors,
+            $articlePdfFilename,
+            $genres,
+            $nlmTitle
+        );
         if (is_array($document)) {
             return $this->discardZip($zip, $zipPath, $document);
         } else {
@@ -630,7 +693,7 @@ class PubmedCentralExportPlugin extends PubObjectsExportPlugin implements HasTas
     /**
      * Remove a temporary file created during an export.
      */
-    private function deleteTempFile(string $path): void
+    public function deleteTempFile(string $path): void
     {
         if (file_exists($path) && !unlink($path)) {
             error_log('Failed to delete temporary export file: ' . $path);
@@ -711,6 +774,17 @@ class PubmedCentralExportPlugin extends PubObjectsExportPlugin implements HasTas
     }
 
     /**
+     * @copydoc PubObjectsExportPlugin::getDepositSuccessNotificationMessageKey()
+     *
+     * Deliveries are queued rather than performed in the request, so the deposit
+     * action reports that the objects were submitted, not that they arrived.
+     */
+    public function getDepositSuccessNotificationMessageKey(): string
+    {
+        return 'plugins.importexport.pmc.submit.success';
+    }
+
+    /**
      * @copydoc PubObjectsExportPlugin::getSettingsFormClassName()
      */
     public function getSettingsFormClassName(): string
@@ -744,11 +818,7 @@ class PubmedCentralExportPlugin extends PubObjectsExportPlugin implements HasTas
     public function getExportActions($context): array
     {
         $actions = [PubObjectsExportPlugin::EXPORT_ACTION_EXPORT, PubObjectsExportPlugin::EXPORT_ACTION_MARKREGISTERED];
-        if (
-            !empty($this->getSetting($context->getId(), 'host')) &&
-            !empty($this->getSetting($context->getId(), 'username')) &&
-            !empty($this->getSetting($context->getId(), 'password'))
-        ) {
+        if ($this->hasCompleteConnectionSettings($context->getId())) {
             array_unshift($actions, PubObjectsExportPlugin::EXPORT_ACTION_DEPOSIT);
         }
         return $actions;
@@ -766,7 +836,8 @@ class PubmedCentralExportPlugin extends PubObjectsExportPlugin implements HasTas
     protected function modifyDefaultJats(
         string $importedJats,
         string $articlePdfFilename,
-        string $nlmTitle
+        string $nlmTitle,
+        ?string $collectionYear = null
     ): string|array {
         $dom = new DOMDocument();
         $dom->preserveWhiteSpace = false;
@@ -856,6 +927,25 @@ class PubmedCentralExportPlugin extends PubObjectsExportPlugin implements HasTas
             $nameNode->removeAttribute('specific-use');
             $node->parentNode->insertBefore($nameNode, $node);
             $node->parentNode->removeChild($node);
+        }
+
+        // PMC requires the electronic publication date to be accompanied by the date of
+        // the collection the article belongs to, and uses it to organize the archive.
+        // Only the year is needed: PMC collects by year where a journal has no volumes.
+        if ($collectionYear) {
+            $pubDateNode = $xpath->query(
+                "pub-date[@date-type='pub' and @publication-format='electronic']",
+                $articleMetaNode
+            )->item(0);
+            if ($pubDateNode) {
+                $collectionDateNode = $dom->createElement('pub-date');
+                $collectionDateNode->setAttribute('date-type', 'collection');
+                $collectionDateNode->setAttribute('publication-format', 'electronic');
+                $collectionDateNode->appendChild($dom->createElement('year', $collectionYear));
+                // Kept alongside the publication date, before the volume and page elements
+                // the JATS content model expects to follow it.
+                $articleMetaNode->insertBefore($collectionDateNode, $pubDateNode->nextSibling);
+            }
         }
 
         // The jatsTemplate plugin points supplementary-material at the galley's OJS download
@@ -974,7 +1064,7 @@ class PubmedCentralExportPlugin extends PubObjectsExportPlugin implements HasTas
      * bundled with the application, so that validation does not depend on a request to
      * jats.nlm.nih.gov. Any other document type is fetched as before.
      */
-    protected function resolveJatsEntity(?string $publicId, string $systemId, array $context): mixed
+    protected function resolveJatsEntity(?string $publicId, string $systemId): string
     {
         return $this->isBundledJatsIdentifier($publicId, $systemId)
             ? Core::getBaseDir() . self::JATS_12_DTD_PATH
@@ -1116,6 +1206,9 @@ class PubmedCentralExportPlugin extends PubObjectsExportPlugin implements HasTas
             if (!$publication->getData('articleNumber')) {
                 $missing[] = __('submission.articleNumber');
             }
+            if (!$this->collectionYear($publication)) {
+                $missing[] = __('plugins.importexport.pmc.export.collectionYear');
+            }
         } else {
             $issueId = $publication->getIssueId();
             $issue = $issueId ? Repo::issue()->get($issueId) : null;
@@ -1143,7 +1236,7 @@ class PubmedCentralExportPlugin extends PubObjectsExportPlugin implements HasTas
     /**
      * Helper to convert an error array to a string.
      */
-    protected function convertErrorMessage(array $errorMessage): string
+    public function convertErrorMessage(array $errorMessage): string
     {
         $message = $errorMessage[0];
         $param = $errorMessage[1] ?? null;

@@ -39,13 +39,13 @@ msgstr "Port (optional, defaults to 21)"
 msgid "plugins.importexport.pmc.endpoint"
 msgstr "Connection Details"
 
+msgid "plugins.importexport.pmc.submit.success"
+msgstr "Articles submitted for deposit."
+
 msgid "plugins.importexport.pmc.downloadWarning"
 msgstr ""
 "When exporting multiple articles, downloaded packages should not be sent to PubMed Central. "
 " Please unzip the packages first and send the article-level zip packages to PubMed Central."
-
-msgid "plugins.importexport.pmc.export.errors"
-msgstr "One or more of the deposits failed. Check the individual article status for details."
 
 msgid "plugins.importexport.pmc.export.failure.settings"
 msgstr "To export the issues to PubMed Central you must setup the credentials in the settings tab."
@@ -104,6 +104,12 @@ msgstr ""
 "The selected package and file naming scheme requires the following metadata, "
 "which is missing: '{$param}'"
 
+msgid "plugins.importexport.pmc.export.collectionYear"
+msgstr "Collection year (from the issue or the article's publication date)"
+
+msgid "plugins.importexport.pmc.export.failure.journalNotFound"
+msgstr "The journal this deposit was queued for could not be found."
+
 msgid "plugins.importexport.pmc.export.failure.missingMediaFile"
 msgstr ""
 "The following file is referenced in the JATS XML but could not be found in the system: '{$param}'."
@@ -114,6 +120,15 @@ msgstr ""
 "Deposit articles automatically to PubMed Central. Please note that this may "
 "take a short amount of time after publication to process (e.g. depending on "
 "your cronjob configuration)."
+
+msgid "plugins.importexport.pmc.settings.form.nlmTitleRequired"
+msgstr "Please provide the journal's NLM Title Abbreviation."
+
+msgid "plugins.importexport.pmc.settings.form.accountIncomplete"
+msgstr "Please provide the host, username and password, or leave all three blank."
+
+msgid "plugins.importexport.pmc.settings.form.automaticRegistrationRequiresAccount"
+msgstr "Automatic deposit requires a complete FTP account: please provide the host, username and password."
 
 msgid "plugins.importexport.pmc.settings.form.jatsImportedOnly"
 msgstr ""
@@ -137,6 +152,9 @@ msgstr "Volume/Issue/Page"
 
 msgid "plugins.importexport.pmc.settings.form.namingType.articleNumber"
 msgstr "Article Number"
+
+msgid "plugins.importexport.pmc.senderTask.name"
+msgstr "PubMed Central automatic deposit task"
 
 msgid "plugins.generic.pmc.displayName"
 msgstr "PubMed Central Plugin"

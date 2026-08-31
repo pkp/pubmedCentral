@@ -18,6 +18,7 @@ use APP\journal\Journal;
 use APP\plugins\generic\pubmedCentral\PubmedCentralExportPlugin;
 use APP\plugins\PubObjectsExportPlugin;
 use APP\publication\Publication;
+use APP\submission\Repository as SubmissionRepository;
 use APP\submission\Submission;
 use DOMDocument;
 use DOMXPath;
@@ -61,6 +62,7 @@ class PubmedCentralExportPluginTest extends PKPTestCase
         // Drop any container binding a test may have replaced so that the next
         // resolution builds a fresh instance.
         app()->forgetInstance(IssueRepository::class);
+        app()->forgetInstance(SubmissionRepository::class);
         parent::tearDown();
     }
 
@@ -108,14 +110,40 @@ class PubmedCentralExportPluginTest extends PKPTestCase
         return $journal;
     }
 
-    private function bindIssueRepository(int $volume, int $number): void
+    private function bindIssueRepository(int $volume, int $number, ?string $datePublished = null): void
     {
         $issue = new Issue();
         $issue->setData('volume', $volume);
         $issue->setData('number', $number);
+        $issue->setData('datePublished', $datePublished);
         $issueRepository = $this->createMock(IssueRepository::class);
         $issueRepository->method('get')->willReturn($issue);
         app()->instance(IssueRepository::class, $issueRepository);
+    }
+
+    /**
+     * Bind a submission repository handing back a submission with the given published
+     * versions, in the order the collector would return them.
+     *
+     * @param array $datesPublished One publication date per version
+     */
+    private function bindSubmissionRepository(array $datesPublished): void
+    {
+        $publications = [];
+        foreach (array_values($datesPublished) as $index => $datePublished) {
+            $publication = new Publication();
+            $publication->setId($index + 1);
+            $publication->setData('status', Submission::STATUS_PUBLISHED);
+            $publication->setData('datePublished', $datePublished);
+            $publications[] = $publication;
+        }
+
+        $submission = new Submission();
+        $submission->setData('publications', collect($publications));
+
+        $submissionRepository = $this->createMock(SubmissionRepository::class);
+        $submissionRepository->method('get')->willReturn($submission);
+        app()->instance(SubmissionRepository::class, $submissionRepository);
     }
 
     /**
@@ -139,11 +167,16 @@ class PubmedCentralExportPluginTest extends PKPTestCase
     /**
      * Call one of the two JATS modifiers, absorbing their differing signatures.
      */
-    private function modifyJats(string $method, string $jats, string $articlePdfFilename): string|array
-    {
+    private function modifyJats(
+        string $method,
+        string $jats,
+        string $articlePdfFilename,
+        ?string $collectionYear = null
+    ): string|array {
         $args = [$jats, $articlePdfFilename];
         if ($method === 'modifyDefaultJats') {
             $args[] = 'J Test';
+            $args[] = $collectionYear;
         }
         return $this->invoke($this->createPlugin(), $method, $args);
     }
@@ -255,6 +288,30 @@ class PubmedCentralExportPluginTest extends PKPTestCase
     }
 
     //
+    // isAccountComplete()
+    //
+    #[DataProvider('accountProvider')]
+    public function testAccountCompletenessCheck(array $account, bool $complete): void
+    {
+        $plugin = $this->createPlugin();
+
+        $this->assertSame($complete, $plugin->isAccountComplete($account));
+    }
+
+    public static function accountProvider(): array
+    {
+        $complete = ['host' => 'ftp.example.org', 'username' => 'user', 'password' => 'secret'];
+
+        return [
+            'complete' => [$complete, true],
+            'nothing set' => [[], false],
+            'blank strings' => [['host' => '', 'username' => '', 'password' => ''], false],
+            'host only' => [['host' => 'ftp.example.org'], false],
+            'password missing' => [array_diff_key($complete, ['password' => null]), false],
+        ];
+    }
+
+    //
     // buildFileName()
     //
     public function testBuildFileNameWithoutAnObjectIsJustTheNlmTitle(): void
@@ -277,7 +334,31 @@ class PubmedCentralExportPluginTest extends PKPTestCase
         );
     }
 
+    /**
+     * PMC organizes the archive by volume, and by the collection year in its place
+     * where a journal carries no volumes, so the year sits between the journal
+     * abbreviation and the article number.
+     */
     public function testBuildFileNameUsesTheArticleNumberScheme(): void
+    {
+        $plugin = $this->createPlugin(['namingType' => 'articleNumber']);
+        $this->bindIssueRepository(12, 3, '2025-03-01');
+
+        $publication = new Publication();
+        $publication->setData('issueId', 7);
+        $publication->setData('articleNumber', 'e12345');
+
+        $this->assertSame(
+            'jtest-2025-e12345.xml',
+            $this->invoke($plugin, 'buildFileName', ['J Test', $this->createJournal(), $publication, false, 'xml'])
+        );
+    }
+
+    /**
+     * A publication with no collection year is stopped by validateNamingMetadata()
+     * before it is named, but the name itself should still not carry an empty part.
+     */
+    public function testBuildFileNameOmitsAnUnknownCollectionYear(): void
     {
         $plugin = $this->createPlugin(['namingType' => 'articleNumber']);
         $publication = new Publication();
@@ -372,6 +453,86 @@ class PubmedCentralExportPluginTest extends PKPTestCase
     }
 
     //
+    // collectionYear()
+    //
+
+    /**
+     * PMC keeps an article in the collection it was first published in, so the year
+     * comes from the issue rather than from the version being deposited.
+     */
+    public function testCollectionYearComesFromTheIssue(): void
+    {
+        $plugin = $this->createPlugin();
+        $this->bindIssueRepository(14, 1, '2025-11-30');
+
+        $publication = new Publication();
+        $publication->setData('issueId', 7);
+        $publication->setData('datePublished', '2026-06-01');
+
+        $this->assertSame('2025', $this->invoke($plugin, 'collectionYear', [$publication]));
+    }
+
+    /**
+     * A journal publishing by article number need not assign its publications to an
+     * issue, in which case the first published version fixes the collection. A second
+     * version published in a later year has to keep the first version's year, or its
+     * revised files would no longer match the names PMC already holds.
+     */
+    public function testCollectionYearFallsBackToTheFirstPublishedVersion(): void
+    {
+        $plugin = $this->createPlugin();
+        $this->bindSubmissionRepository(['2025-12-01', '2026-06-01']);
+
+        $publication = new Publication();
+        $publication->setId(2);
+        $publication->setData('submissionId', 5);
+        $publication->setData('datePublished', '2026-06-01');
+
+        $this->assertSame('2025', $this->invoke($plugin, 'collectionYear', [$publication]));
+    }
+
+    public function testCollectionYearOfASubmissionUsesItsOwnPublications(): void
+    {
+        $plugin = $this->createPlugin();
+
+        $publications = [];
+        foreach (['2025-12-01', '2026-06-01'] as $index => $datePublished) {
+            $publication = new Publication();
+            $publication->setId($index + 1);
+            $publication->setData('status', Submission::STATUS_PUBLISHED);
+            $publication->setData('datePublished', $datePublished);
+            $publications[] = $publication;
+        }
+        $submission = new Submission();
+        $submission->setData('publications', collect($publications));
+        $submission->setData('currentPublicationId', 2);
+
+        $this->assertSame('2025', $this->invoke($plugin, 'collectionYear', [$submission]));
+    }
+
+    /**
+     * A publication that is in no issue and has no earlier version falls back to its
+     * own publication date.
+     */
+    public function testCollectionYearFallsBackToThePublicationDate(): void
+    {
+        $plugin = $this->createPlugin();
+
+        $publication = new Publication();
+        $publication->setData('datePublished', '2026-06-01');
+
+        $this->assertSame('2026', $this->invoke($plugin, 'collectionYear', [$publication]));
+    }
+
+    public function testCollectionYearIsNullWhenNoDateIsRecorded(): void
+    {
+        $plugin = $this->createPlugin();
+
+        $this->assertNull($this->invoke($plugin, 'collectionYear', [new Publication()]));
+        $this->assertNull($this->invoke($plugin, 'collectionYear', [null]));
+    }
+
+    //
     // validateNamingMetadata()
     //
     public function testNamingMetadataIsValidWhenEverythingIsPresent(): void
@@ -379,6 +540,7 @@ class PubmedCentralExportPluginTest extends PKPTestCase
         $plugin = $this->createPlugin(['nlmTitle' => 'J Test', 'namingType' => 'articleNumber']);
         $publication = new Publication();
         $publication->setData('articleNumber', 'e12345');
+        $publication->setData('datePublished', '2025-03-01');
 
         $this->assertNull(
             $this->invoke($plugin, 'validateNamingMetadata', [$publication, $this->createJournal()])
@@ -410,7 +572,9 @@ class PubmedCentralExportPluginTest extends PKPTestCase
         $result = $this->invoke($plugin, 'validateNamingMetadata', [$publication, $this->createJournal()]);
 
         $this->assertSame(
-            __('plugins.importexport.pmc.settings.form.nlmTitle') . ', ' . __('submission.articleNumber'),
+            __('plugins.importexport.pmc.settings.form.nlmTitle') . ', '
+                . __('submission.articleNumber') . ', '
+                . __('plugins.importexport.pmc.export.collectionYear'),
             $result[1]
         );
     }
@@ -419,10 +583,26 @@ class PubmedCentralExportPluginTest extends PKPTestCase
     {
         $plugin = $this->createPlugin(['nlmTitle' => 'J Test', 'namingType' => 'articleNumber']);
         $publication = new Publication();
+        $publication->setData('datePublished', '2025-03-01');
 
         $result = $this->invoke($plugin, 'validateNamingMetadata', [$publication, $this->createJournal()]);
 
         $this->assertSame(__('submission.articleNumber'), $result[1]);
+    }
+
+    /**
+     * The article number scheme names packages by the collection year, so an article
+     * whose year cannot be determined cannot be named.
+     */
+    public function testMissingCollectionYearIsReportedForTheArticleNumberScheme(): void
+    {
+        $plugin = $this->createPlugin(['nlmTitle' => 'J Test', 'namingType' => 'articleNumber']);
+        $publication = new Publication();
+        $publication->setData('articleNumber', 'e12345');
+
+        $result = $this->invoke($plugin, 'validateNamingMetadata', [$publication, $this->createJournal()]);
+
+        $this->assertSame(__('plugins.importexport.pmc.export.collectionYear'), $result[1]);
     }
 
     public function testMissingIssueIsReportedForTheVolumeIssueScheme(): void
@@ -714,7 +894,7 @@ class PubmedCentralExportPluginTest extends PKPTestCase
     #[DataProvider('jatsEntityProvider')]
     public function testResolveJatsEntityPrefersTheBundledDtd(?string $publicId, string $systemId, bool $bundled): void
     {
-        $resolved = $this->invoke($this->createPlugin(), 'resolveJatsEntity', [$publicId, $systemId, []]);
+        $resolved = $this->invoke($this->createPlugin(), 'resolveJatsEntity', [$publicId, $systemId]);
 
         if (!$bundled) {
             $this->assertSame($systemId, $resolved, 'Anything else should be left to libxml');
@@ -969,6 +1149,55 @@ class PubmedCentralExportPluginTest extends PKPTestCase
         $this->assertSame(1, $abbrev->length);
         $this->assertSame('nlm-ta', $abbrev->item(0)->getAttribute('abbrev-type'));
         $this->assertSame('J Test', $abbrev->item(0)->textContent);
+    }
+
+    /**
+     * PMC requires the electronic publication date to be accompanied by the date of
+     * the collection the article belongs to. Only the year is needed, and it has to
+     * stay among the pub-date elements, which the JATS content model places before
+     * the volume and page elements.
+     */
+    public function testDefaultJatsAddsTheCollectionDate(): void
+    {
+        $result = $this->modifyJats('modifyDefaultJats', $this->jats(), 'jtest.pdf', '2025');
+
+        $this->assertIsString($result);
+        $xpath = $this->xpath($result);
+
+        $collectionDates = $xpath->query("//article-meta/pub-date[@date-type='collection']");
+        $this->assertSame(1, $collectionDates->length);
+        $this->assertSame('electronic', $collectionDates->item(0)->getAttribute('publication-format'));
+        $this->assertSame('2025', $xpath->evaluate("string(//pub-date[@date-type='collection']/year)"));
+
+        $pubDates = $xpath->query('//article-meta/pub-date');
+        $this->assertSame(2, $pubDates->length);
+        $this->assertSame('pub', $pubDates->item(0)->getAttribute('date-type'));
+        $this->assertSame('collection', $pubDates->item(1)->getAttribute('date-type'));
+    }
+
+    public function testDefaultJatsAddsNoCollectionDateWithoutACollectionYear(): void
+    {
+        $result = $this->modifyJats('modifyDefaultJats', $this->jats(), 'jtest.pdf');
+
+        $this->assertIsString($result);
+        $this->assertSame(
+            0,
+            $this->xpath($result)->query("//pub-date[@date-type='collection']")->length
+        );
+    }
+
+    /**
+     * PMC only accepts a collection date on an article that also carries an electronic
+     * publication date, so an unpublished article gets neither.
+     */
+    public function testDefaultJatsAddsNoCollectionDateWithoutAPublicationDate(): void
+    {
+        $jats = preg_replace('|<pub-date.*?</pub-date>|', '', $this->jats());
+
+        $result = $this->modifyJats('modifyDefaultJats', $jats, 'jtest.pdf', '2025');
+
+        $this->assertIsString($result);
+        $this->assertSame(0, $this->xpath($result)->query('//pub-date')->length);
     }
 
     public function testDefaultJatsSetsTheArticleType(): void
