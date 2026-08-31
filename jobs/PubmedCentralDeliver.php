@@ -47,6 +47,7 @@ class PubmedCentralDeliver extends BaseJob
 
     /**
      * Execute the job.
+     * @throws JobException
      */
     public function handle(): void
     {
@@ -63,27 +64,34 @@ class PubmedCentralDeliver extends BaseJob
             return;
         }
 
-        // The journal can be removed while deliveries for it are still queued
+        // The journal can be removed while deliveries for it are still queued. Like a
+        // package that cannot be built below, this will fail the same way on every
+        // attempt, so record the failure for the status column and stop: throwing would
+        // only have the queue retry it and log a stack trace for each attempt.
         $context = Application::getContextDAO()->getById($this->contextId);
         if (!$context) {
             $errorMessage = $plugin->convertErrorMessage(
                 ['plugins.importexport.pmc.export.failure.journalNotFound']
             );
             $plugin->updateStatus($object, PubObjectsExportPlugin::EXPORT_STATUS_ERROR, $errorMessage);
-            throw new JobException($errorMessage);
+            return;
         }
 
+        // Missing metadata, an unreadable galley or invalid JATS are content problems for
+        // an editor to fix, and the recorded message is the whole report
         $package = $plugin->createZip($object, $context, $this->noValidation);
         if (isset($package['error'])) {
             $errorMessage = $plugin->convertErrorMessage($package['error']);
             $plugin->updateStatus($object, PubObjectsExportPlugin::EXPORT_STATUS_ERROR, $errorMessage);
-            throw new JobException($errorMessage);
+            return;
         }
 
         try {
             $plugin->deliverToEndpoint($package['path'], $package['filename'] . '.zip', $context);
             $plugin->updateStatus($object, PubObjectsExportPlugin::EXPORT_STATUS_REGISTERED);
         } catch (Throwable $e) {
+            // A refused connection or a dropped transfer may well succeed on a later
+            // attempt, so this one is thrown for the queue to retry
             $plugin->updateStatus($object, PubObjectsExportPlugin::EXPORT_STATUS_ERROR, $e->getMessage());
             throw new JobException($e->getMessage());
         } finally {
