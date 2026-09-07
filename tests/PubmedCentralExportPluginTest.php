@@ -1364,6 +1364,44 @@ class PubmedCentralExportPluginTest extends PKPTestCase
         );
     }
 
+    /**
+     * The article-type follows the section the article was published in, using the
+     * Open Research Europe section names; anything else is a research article.
+     */
+    #[DataProvider('sectionArticleTypeProvider')]
+    public function testDefaultJatsMapsTheSectionToThePmcArticleType(string $section, string $articleType): void
+    {
+        $categories = sprintf(
+            '<article-categories><subj-group subj-group-type="heading"><subject>%s</subject></subj-group></article-categories>',
+            $section
+        );
+
+        $result = $this->modifyJats('modifyDefaultJats', $this->jats($categories), 'jtest.pdf');
+
+        $this->assertSame(
+            $articleType,
+            $this->xpath($result)->query('/article')->item(0)->getAttribute('article-type')
+        );
+    }
+
+    public static function sectionArticleTypeProvider(): array
+    {
+        return [
+            'open letter' => ['Open Letter', 'letter'],
+            'review' => ['Review', 'review-article'],
+            'study protocol' => ['Study Protocol', 'other'],
+            'systematic review' => ['Systematic Review', 'systematic-review'],
+            'data note' => ['Data Note', 'data-paper'],
+            'method article' => ['Method Article', 'methods-article'],
+            'brief report' => ['Brief Report', 'brief-report'],
+            'retraction' => ['Retraction', 'retraction'],
+            'case differs' => ['OPEN LETTER', 'letter'],
+            'surrounding space' => [' Review ', 'review-article'],
+            'generic articles section' => ['Articles', 'research-article'],
+            'unknown section' => ['Poetry Corner', 'research-article'],
+        ];
+    }
+
     public function testDefaultJatsKeepsOnlyAuthorAndEditorContributors(): void
     {
         $contribGroup = <<<'XML'

@@ -87,6 +87,39 @@ class PubmedCentralExportPlugin extends PubObjectsExportPlugin implements HasTas
     ];
 
     /**
+     * The article-type PMC gives each kind of article a journal section holds, keyed by
+     * the section's title in lower case. This is a customization for Open Research
+     * Europe, whose sections are the ones listed; a section that is not listed, such as
+     * its generic "Articles" and "Research Articles" sections, is exported as a research
+     * article. Clinical practice and software tool articles report research and have no
+     * PMC type of their own, and PMC keeps "other" for what fits nothing else, which is
+     * where it places study protocols and essays.
+     *
+     * @see https://pmc.ncbi.nlm.nih.gov/tagging-guidelines/article/dobs/#dob-artype
+     */
+    protected const ORE_SECTION_ARTICLE_TYPES = [
+        'brief report' => 'brief-report',
+        'case report' => 'case-report',
+        'case study' => 'case-study',
+        'clinical practice article' => 'research-article',
+        'data note' => 'data-paper',
+        'essay' => 'other',
+        'method article' => 'methods-article',
+        'open letter' => 'letter',
+        'research article' => 'research-article',
+        'review' => 'review-article',
+        'software tool article' => 'research-article',
+        'study protocol' => 'other',
+        'systematic review' => 'systematic-review',
+        'retraction' => 'retraction',
+    ];
+
+    /**
+     * The article-type given to an article whose section is not mapped.
+     */
+    protected const DEFAULT_ARTICLE_TYPE = 'research-article';
+
+    /**
      * The characters PMC's style checker collapses before deciding whether an element is
      * empty. XPath's own normalize-space() covers only space, tab, CR and LF, so a paragraph
      * holding nothing but a non-breaking space reads as empty to PMC and as content here.
@@ -1282,10 +1315,10 @@ class PubmedCentralExportPlugin extends PubObjectsExportPlugin implements HasTas
         $this->rewriteRelatedObjects($xpath);
         $this->removeEmptyParagraphs($xpath);
 
-        // Add the article-type to the article element
+        // Add the article-type to the article element, from the section the article is in
         $articleNode = $dom->documentElement;
         if ($articleNode instanceof DOMElement) {
-            $articleNode->setAttribute('article-type', 'research-article');
+            $articleNode->setAttribute('article-type', $this->articleTypeForSection($xpath));
         }
 
         return $dom->saveXML();
@@ -1345,6 +1378,21 @@ class PubmedCentralExportPlugin extends PubObjectsExportPlugin implements HasTas
         $this->removeEmptyParagraphs($xpath);
 
         return $dom->saveXML();
+    }
+
+    /**
+     * The PMC article-type for the section a generated document places its article in.
+     *
+     * The jatsTemplate plugin writes the section title as the heading subject, so the
+     * section is read back from there and looked up in the Open Research Europe mapping.
+     */
+    protected function articleTypeForSection(DOMXPath $xpath): string
+    {
+        $section = $xpath->evaluate(
+            "string(//article/front/article-meta/article-categories/subj-group[@subj-group-type='heading']/subject)"
+        );
+
+        return self::ORE_SECTION_ARTICLE_TYPES[mb_strtolower(trim($section))] ?? self::DEFAULT_ARTICLE_TYPE;
     }
 
     /**
