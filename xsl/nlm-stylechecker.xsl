@@ -26,7 +26,7 @@
  -->
 <!-- ************************************************************************ -->
 <!--                                     NLM STYLECHECKER
-                                           Version 5.48
+                                           Version 5.49
     
     Stylesheet tests an XML instance to determine whether it conforms to correct
     PMC style as defined in the Tagging Guidelines located at:
@@ -76,6 +76,15 @@
      
      
    PMC Project Revision notes:
+
+   August 10, 2026
+        Cut release branch for version 5.49.
+        Public release of 3rd quarter changes will occur on September 8, 2026.
+
+   July 24, 2026
+        In alternatives-content-check, allow <textual-form> in <alternatives>
+        when parent is <disp-formula>, <inline-formula>, <chem-struct>, or
+        <chem-struct-wrap>.
 
    May 11, 2026
         Cut release branch for Version 5.48.
@@ -1027,7 +1036,7 @@
                           not(self::text())])"/>
 
    <!-- Indicate our own version -->
-   <xsl:param name="stylechecker-version"     select="'5.48'"/>
+   <xsl:param name="stylechecker-version"     select="'5.49'"/>
    <xsl:param name="stylechecker-mainline"    select="'nlm-stylechecker5.xsl'"/>
 
    <!-- The 'style' selects the rules that can be applied by the stylechecker.
