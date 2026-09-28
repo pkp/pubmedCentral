@@ -127,26 +127,49 @@ class JatsDocument
     ];
 
     /**
-     * The XLink namespace, which JATS uses for every reference to a file.
+     * The XLink namespace, which JATS uses for every reference to a packaged file.
      */
     protected const XLINK_NS = 'http://www.w3.org/1999/xlink';
 
     /**
-     * A reference to somewhere else on the web, rather than to a file of the publication's.
+     * A reference to somewhere else on the web, rather than to a file of the publication's
+     * that can be packaged alongside the article.
      */
     protected const EXTERNAL_REFERENCE = '#^[a-z][a-z0-9+.-]*:#i';
 
-    protected DOMDocument $dom;
+    /**
+     * The elements whose @xlink:href points at a file that has to be packaged, mapped
+     * to the component PMC's naming scheme gives that kind of file.
+     */
+    protected const MEDIA_ELEMENT_TYPES = [
+        'graphic' => 'g',
+        'inline-graphic' => 'i',
+        'media' => 's',
+        'supplementary-material' => 's',
+    ];
 
+    protected DOMDocument $dom;
     protected DOMXPath $xpath;
+
+    /**
+     * The media files the document refers to, as [packaged file name => path in the file
+     * store]. Filled in while the document is prepared, and read back to decide what goes
+     * into the package alongside it.
+     */
+    protected array $packagedMedia = [];
 
     /**
      * @param string $jats The document as it was generated or uploaded
      * @param string $articlePdfFilename The name the article PDF is packaged under
+     * @param array $mediaFiles The publication's media files, file store paths keyed by file name
+     * @param string $mediaBaseName The package's base file name, which the names given to
+     *  packaged media files are built from
      */
     public function __construct(
         protected string $jats,
-        protected string $articlePdfFilename
+        protected string $articlePdfFilename,
+        protected array $mediaFiles = [],
+        protected string $mediaBaseName = ''
     ) {
     }
 
@@ -178,6 +201,11 @@ class JatsDocument
         $this->unwrapNameAlternatives();
         $this->addCollectionDate($collectionYear);
 
+        if ($error = $this->packageMediaReferences()) {
+            return $error;
+        }
+
+        // Runs after packaging, which is what decides whether a reference resolves
         $this->removeUnpackagedSupplementaryMaterial();
 
         if ($error = $this->addSelfUri()) {
@@ -193,10 +221,21 @@ class JatsDocument
     }
 
     /**
+     * The media files the prepared document refers to, as [packaged file name => path in
+     * the file store].
+     */
+    public function getPackagedMedia(): array
+    {
+        return $this->packagedMedia;
+    }
+
+    /**
      * Load the document, ready for the steps that follow.
      */
     protected function open(): ?array
     {
+        $this->packagedMedia = [];
+
         $this->dom = new DOMDocument();
         $this->dom->preserveWhiteSpace = false;
 
@@ -376,7 +415,8 @@ class JatsDocument
      * The jatsTemplate plugin points supplementary-material at the galley's OJS download
      * URL, which is not a packaged file, and the style check rejects an @xlink:href with
      * no file extension outright, so drop these rather than ship a reference that cannot
-     * resolve.
+     * resolve. What packaging resolved to a media file stays, and is deposited with the
+     * article.
      *
      * @todo Point a generated document's supplementary galleys at packaged files, so that
      * they can be deposited rather than dropped.
@@ -491,6 +531,80 @@ class JatsDocument
             'article-type',
             self::ORE_SECTION_ARTICLE_TYPES[mb_strtolower(trim($section))] ?? self::DEFAULT_ARTICLE_TYPE
         );
+    }
+
+    /**
+     * Point every reference to a media file at the name that file is packaged under,
+     * and record what has to go into the package.
+     *
+     * A document refers to its figures by the file names the depositor works with, whether
+     * it was uploaded or generated from the submission. PMC needs those names to follow its
+     * own scheme, and every file in a package has to be referenced from the XML, so the
+     * document decides what is packaged: a media file nothing refers to is left out, and a
+     * reference that matches no media file stops the export.
+     */
+    protected function packageMediaReferences(): ?array
+    {
+        // Also indexed by name without its extension: a document is often written against
+        // a file whose extension has since changed, or which was uploaded in another
+        // format. A stem naming more than one file is dropped, because a reference that
+        // could be answered with either of two files is no match at all.
+        $stems = [];
+        foreach ($this->mediaFiles as $name => $path) {
+            $stem = pathinfo($name, PATHINFO_FILENAME);
+            $stems[$stem] = array_key_exists($stem, $stems) && $stems[$stem] !== $path ? null : $path;
+        }
+        $stems = array_filter($stems);
+
+        $elements = implode(' | ', array_map(fn ($name) => '//' . $name, array_keys(self::MEDIA_ELEMENT_TYPES)));
+        $counts = [];
+        $packagedNames = [];
+
+        foreach ($this->xpath->query($elements) as $node) { /** @var DOMElement $node */
+            // Held as the attribute node so that the reference is read and rewritten the
+            // same way, whether the document declares the xlink namespace
+            $href = $node->getAttributeNodeNS(self::XLINK_NS, 'href') ?: $node->getAttributeNode('xlink:href');
+
+            // An element with no reference, or one pointing somewhere else on the web,
+            // has no file of ours behind it to package
+            if (!$href || $href->value === '' || preg_match(self::EXTERNAL_REFERENCE, $href->value)) {
+                continue;
+            }
+
+            $name = strtolower(basename($href->value));
+            $path = $this->mediaFiles[$name] ?? $stems[pathinfo($name, PATHINFO_FILENAME)] ?? null;
+
+            // Naming what the publication does have: the mismatch is usually a media file
+            // whose name has drifted from the one the document was written against
+            if (!$path) {
+                return [
+                    'plugins.importexport.pmc.export.failure.missingMediaFile',
+                    $this->mediaFiles
+                        ? __('plugins.importexport.pmc.export.failure.missingMediaFile.available', [
+                            'reference' => $href->value,
+                            'files' => implode(', ', array_keys($this->mediaFiles)),
+                        ])
+                        : __('plugins.importexport.pmc.export.failure.missingMediaFile.none', [
+                            'reference' => $href->value,
+                        ]),
+                ];
+            }
+
+            // Keyed by the file rather than the reference, so that a file named two ways
+            // is still packaged once
+            if (!isset($packagedNames[$path])) {
+                $type = self::MEDIA_ELEMENT_TYPES[$node->nodeName];
+                $counts[$type] = ($counts[$type] ?? 0) + 1;
+                $sequence = str_pad((string) $counts[$type], 3, '0', STR_PAD_LEFT);
+                $extension = strtolower(pathinfo($path, PATHINFO_EXTENSION));
+                $packagedNames[$path] = $this->mediaBaseName . '-' . $type . $sequence . '.' . $extension;
+                $this->packagedMedia[$packagedNames[$path]] = $path;
+            }
+
+            $href->value = $packagedNames[$path];
+        }
+
+        return null;
     }
 
     protected function journalMeta(): ?DOMElement

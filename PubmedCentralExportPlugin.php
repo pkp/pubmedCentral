@@ -14,6 +14,7 @@
 
 namespace APP\plugins\generic\pubmedCentral;
 
+use APP\core\Application;
 use APP\facades\Repo;
 use APP\notification\NotificationManager;
 use APP\plugins\generic\pubmedCentral\classes\form\PubmedCentralSettingsForm;
@@ -39,6 +40,8 @@ use PKP\plugins\interfaces\HasTaskScheduler;
 use PKP\scheduledTask\PKPScheduler;
 use PKP\submission\Genre;
 use PKP\submission\GenreDAO;
+use PKP\submissionFile\enums\MediaVariantType;
+use PKP\submissionFile\SubmissionFile;
 use PKP\xslt\XSLTransformer;
 use ZipArchive;
 
@@ -57,6 +60,13 @@ class PubmedCentralExportPlugin extends PubObjectsExportPlugin implements HasTas
      * reported, collected across every object in the export and de-duplicated.
      */
     protected array $validationWarnings = [];
+
+    /**
+     * The media files the document being exported refers to, as
+     * [packaged file name => path in the file store]. Taken from the prepared document,
+     * and read by createZip() to add each file to the package.
+     */
+    protected array $packagedMedia = [];
 
     /**
      * @copydoc ImportExportPlugin::display()
@@ -176,6 +186,52 @@ class PubmedCentralExportPlugin extends PubObjectsExportPlugin implements HasTas
         $timestamp = $datePublished ? strtotime($datePublished) : false;
 
         return $timestamp ? date('Y', $timestamp) : null;
+    }
+
+    /**
+     * The publication's media files, indexed by the file names a document would refer to
+     * them by.
+     *
+     * Where a media file is linked to a high-resolution variant, that variant is what
+     * gets packaged: PMC asks for the highest resolution available, and both names
+     * resolve to it so the document may refer to either one.
+     *
+     * @return array<string, string> Paths in the file store, keyed by lowercased file name
+     */
+    protected function getMediaFiles(Publication $publication): array
+    {
+        $fileService = app()->get('file');
+
+        // Collected rather than left lazy: the files are walked twice, and re-iterating
+        // a lazy collection would run the query again
+        $mediaFiles = Repo::submissionFile()
+            ->getCollector()
+            ->filterBySubmissionIds([$publication->getData('submissionId')])
+            ->filterByFileStages([SubmissionFile::SUBMISSION_FILE_MEDIA])
+            ->filterByAssoc(Application::ASSOC_TYPE_PUBLICATION, [$publication->getId()])
+            ->getMany()
+            ->collect();
+
+        // Only a file linked to a variant group answers for its counterpart. An unlinked
+        // one stands for itself: grouping those together would key them all as one.
+        $highResolution = $mediaFiles
+            ->filter(fn (SubmissionFile $file) => $file->getData('variantGroupId')
+                && $file->getData('variantType') === MediaVariantType::HIGH_RESOLUTION->value)
+            ->keyBy(fn (SubmissionFile $file) => $file->getData('variantGroupId'));
+
+        $files = [];
+        foreach ($mediaFiles as $mediaFile) { /** @var SubmissionFile $mediaFile */
+            $packagedFile = $highResolution->get($mediaFile->getData('variantGroupId')) ?? $mediaFile;
+            $path = $fileService->get($packagedFile->getData('fileId'))->path;
+
+            // The name is the only record of the file name the document was written
+            // against: what is stored on disk is a generated name.
+            foreach ((array) $mediaFile->getData('name') as $name) {
+                $files[strtolower($name)] = $path;
+            }
+        }
+
+        return $files;
     }
 
     /**
@@ -323,9 +379,22 @@ class PubmedCentralExportPlugin extends PubObjectsExportPlugin implements HasTas
         // reports only what it found.
         libxml_clear_errors();
 
-        // Prepare the document to meet PMC requirements
-        $returnXml = (new JatsDocument($xml, $articlePdfFilename))
-            ->prepare($nlmTitle ?? $this->nlmTitle($context), $this->collectionYear($object));
+        // Prepare the document to meet PMC requirements, which is also what decides
+        // which of the publication's media files are packaged, and under what names.
+        // @todo Warn the depositor when a media file is left out because nothing refers to
+        // it, or when one marked as the web version is packaged because no high-resolution
+        // version is linked to it. Warnings raised during an export only appear once the
+        // page is reloaded, as the export responds with the download rather than a page,
+        // and a deposit's queued job does not report warnings at all.
+        $nlmTitle ??= $this->nlmTitle($context);
+        $jatsDocument = new JatsDocument(
+            $xml,
+            $articlePdfFilename,
+            $this->getMediaFiles($publication),
+            $this->buildFileName($nlmTitle, $context, $object)
+        );
+        $returnXml = $jatsDocument->prepare($nlmTitle, $this->collectionYear($object));
+        $this->packagedMedia = $jatsDocument->getPackagedMedia();
 
         if (is_array($returnXml)) {
             return $returnXml;
@@ -569,19 +638,9 @@ class PubmedCentralExportPlugin extends PubObjectsExportPlugin implements HasTas
             $pdfFilesFound++;
         }
 
-        // @todo High-resolution media files are not packaged. PMC requires every file
-        // in a package to be referenced from the XML, and nothing references them
-        // today: generated JATS contains no <graphic> elements for them, and uploaded
-        // JATS references the depositor's own filenames. Reinstating this needs, at a
-        // minimum: a per-file component in the packaged name (buildFileName() is
-        // derived from the publication, so every media file would otherwise collide
-        // and ZipArchive would silently keep only the last), a flat
-        // [sourceName => packagedName] map, rewriting //graphic/@xlink:href in
-        // JatsDocument, and reporting the unused
-        // plugins.importexport.pmc.export.failure.missingMediaFile error when the XML
-        // references a file that was not uploaded.
-
-        // Add article XML to the zip
+        // Add article XML to the zip. Modifying the document is what decides which of
+        // the publication's media files are packaged, and under what names, so the
+        // media files are added afterwards.
         $document = $this->exportXML(
             $object,
             null,
@@ -603,6 +662,16 @@ class PubmedCentralExportPlugin extends PubObjectsExportPlugin implements HasTas
                     ['plugins.importexport.pmc.export.failure.addingFile', $zip->getStatusString()]
                 );
             }
+            foreach ($this->packagedMedia as $packagedName => $mediaPath) {
+                if (!$zip->addFromString($packagedName, $fileService->fs->read($mediaPath))) {
+                    return $this->discardZip(
+                        $zip,
+                        $zipPath,
+                        ['plugins.importexport.pmc.export.failure.addingFile', $zip->getStatusString()]
+                    );
+                }
+            }
+
             $zipDetails['filename'] = $this->buildFileName($nlmTitle, $context, $object, true);
             $zipDetails['path'] = $zipPath;
             $zip->close();

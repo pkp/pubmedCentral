@@ -109,8 +109,16 @@ msgstr "The journal this deposit was queued for could not be found."
 
 msgid "plugins.importexport.pmc.export.failure.missingMediaFile"
 msgstr ""
-"The following file is referenced in the JATS XML but could not be found in the system: '{$param}'."
-"Remove the file from the JATS or upload it to the publication's media files and try again."
+"A file referenced in the JATS XML could not be matched to the publication's media files. {$param} "
+"Remove the reference from the JATS, or upload the file to the publication's media files, and try again."
+
+msgid "plugins.importexport.pmc.export.failure.missingMediaFile.available"
+msgstr ""
+"'{$reference}' does not match any of the media files available: {$files}."
+
+msgid "plugins.importexport.pmc.export.failure.missingMediaFile.none"
+msgstr ""
+"'{$reference}' was referenced, but the publication has no media files."
 
 msgid "plugins.importexport.pmc.settings.form.automaticRegistration.description"
 msgstr ""

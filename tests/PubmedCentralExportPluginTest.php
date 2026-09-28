@@ -22,10 +22,22 @@ use APP\publication\enums\VersionStage;
 use APP\publication\Publication;
 use APP\submission\Repository as SubmissionRepository;
 use APP\submission\Submission;
+use APP\submissionFile\Repository as SubmissionFileRepository;
+use PKP\db\DAORegistry;
+use PKP\galley\Galley;
+use PKP\jats\JatsFile;
+use PKP\jats\Repository as JatsRepository;
+use PKP\submission\Genre;
+use PKP\submission\GenreDAO;
 use DOMDocument;
 use DOMXPath;
+use Illuminate\Support\LazyCollection;
 use PHPUnit\Framework\Attributes\CoversClass;
 use PHPUnit\Framework\Attributes\DataProvider;
+use PHPUnit\Framework\MockObject\MockObject;
+use PKP\submissionFile\Collector as SubmissionFileCollector;
+use PKP\submissionFile\enums\MediaVariantType;
+use PKP\submissionFile\SubmissionFile;
 use PKP\tests\PKPTestCase;
 use ReflectionMethod;
 use ZipArchive;
@@ -65,7 +77,18 @@ class PubmedCentralExportPluginTest extends PKPTestCase
         // resolution builds a fresh instance.
         app()->forgetInstance(IssueRepository::class);
         app()->forgetInstance(SubmissionRepository::class);
+        app()->forgetInstance(SubmissionFileRepository::class);
+        app()->forgetInstance(JatsRepository::class);
+        app()->forgetInstance('file');
         parent::tearDown();
+    }
+
+    /**
+     * @copydoc PKPTestCase::getMockedDAOs()
+     */
+    protected function getMockedDAOs(): array
+    {
+        return ['GenreDAO'];
     }
 
     //
@@ -146,6 +169,81 @@ class PubmedCentralExportPluginTest extends PKPTestCase
         $submissionRepository = $this->createMock(SubmissionRepository::class);
         $submissionRepository->method('get')->willReturn($submission);
         app()->instance(SubmissionRepository::class, $submissionRepository);
+    }
+
+    /**
+     * Bind a submission file repository handing back the given media files, and a file
+     * service resolving each file id to a path.
+     *
+     * @param array $paths [file id => path in the file store]
+     */
+    private function bindMediaFiles(array $mediaFiles, array $paths): MockObject
+    {
+        $collector = $this->createMock(SubmissionFileCollector::class);
+        foreach (['filterBySubmissionIds', 'filterByFileStages', 'filterByAssoc'] as $filter) {
+            $collector->method($filter)->willReturnSelf();
+        }
+        $collector->method('getMany')->willReturn(LazyCollection::make($mediaFiles));
+
+        $submissionFileRepository = $this->createMock(SubmissionFileRepository::class);
+        $submissionFileRepository->method('getCollector')->willReturn($collector);
+        app()->instance(SubmissionFileRepository::class, $submissionFileRepository);
+
+        // Stands in for the file store: resolves a file id to its path, and reads the
+        // bytes that get packaged
+        $fileService = new class ($paths) {
+            public object $fs;
+
+            public function __construct(private array $paths)
+            {
+                $this->fs = new class {
+                    public function read(string $path): string
+                    {
+                        return "contents of {$path}";
+                    }
+                };
+            }
+
+            public function get(int $fileId): object
+            {
+                return (object) ['path' => $this->paths[$fileId]];
+            }
+        };
+        app()->instance('file', $fileService);
+
+        return $submissionFileRepository;
+    }
+
+    /**
+     * Build a media file as the media files panel stores one.
+     */
+    private function createMediaFile(
+        int $id,
+        int $fileId,
+        string $name,
+        ?int $variantGroupId = null,
+        ?MediaVariantType $variantType = null
+    ): SubmissionFile {
+        $mediaFile = new SubmissionFile();
+        $mediaFile->setId($id);
+        $mediaFile->setData('fileId', $fileId);
+        $mediaFile->setData('name', ['en' => $name]);
+        $mediaFile->setData('variantGroupId', $variantGroupId);
+        $mediaFile->setData('variantType', $variantType?->value);
+        return $mediaFile;
+    }
+
+    /**
+     * Prepare a document that refers to media files, returning the result alongside the
+     * media it recorded for packaging.
+     *
+     * @return array [result, packagedMedia]
+     */
+    private function prepareJatsWithMedia(string $jats, array $mediaFiles): array
+    {
+        $document = new JatsDocument($jats, 'jtest.pdf', $mediaFiles, 'jtest-2025-82');
+
+        return [$document->prepare('J Test'), $document->getPackagedMedia()];
     }
 
     /**
@@ -751,6 +849,108 @@ class PubmedCentralExportPluginTest extends PKPTestCase
         );
     }
 
+    /**
+     * Package an uploaded document referring to the given media files, skipping validation.
+     *
+     * @param SubmissionFile[] $mediaFiles
+     * @param array $mediaPaths [file id => path in the file store] for the media files; ids
+     *  12 and 13 are the PDF galley and the JATS
+     *
+     * @return array [plugin, package]
+     */
+    private function packageWithMedia(array $mediaFiles, array $mediaPaths, string $body): array
+    {
+        $plugin = $this->createPlugin(['nlmTitle' => 'J Test', 'namingType' => 'articleNumber']);
+
+        $submissionFileRepository = $this->bindMediaFiles(
+            $mediaFiles,
+            [12 => 'journals/1/galley.pdf', 13 => 'journals/1/article.xml'] + $mediaPaths
+        );
+
+        // The PDF galley, and the uploaded JATS the document is read from
+        $galleyFile = new SubmissionFile();
+        $galleyFile->setData('mimetype', 'application/pdf');
+        $galleyFile->setData('genreId', 4);
+        $galleyFile->setData('fileId', 12);
+        $submissionFileRepository->method('get')->willReturn($galleyFile);
+
+        $jatsSubmissionFile = new SubmissionFile();
+        $jatsSubmissionFile->setData('fileId', 13);
+        $submissionFileRepository->method('getSubmissionFileContent')->willReturn($this->jatsWithBody($body));
+
+        $jatsRepository = $this->createMock(JatsRepository::class);
+        $jatsRepository->method('getJatsFile')->willReturn(new JatsFile(3, 5, $jatsSubmissionFile));
+        app()->instance(JatsRepository::class, $jatsRepository);
+
+        $genre = new Genre();
+        $genre->setData('category', Genre::GENRE_CATEGORY_DOCUMENT);
+        $genre->setData('supplementary', false);
+        $genre->setData('dependent', false);
+        $genreDao = $this->createMock(GenreDAO::class);
+        $genreDao->method('getEnabledByContextId')->willReturn(collect([]));
+        $genreDao->method('getById')->willReturn($genre);
+        DAORegistry::registerDAO('GenreDAO', $genreDao);
+
+        // The collection year, which the package name is built from
+        $this->bindSubmissionRepository(['2025-03-01']);
+
+        $galley = new Galley();
+        $galley->setData('locale', 'en');
+        $galley->setData('submissionFileId', 21);
+
+        $publication = new Publication();
+        $publication->setId(3);
+        $publication->setData('submissionId', 5);
+        $publication->setData('locale', 'en');
+        $publication->setData('articleNumber', 'e12345');
+        $publication->setData('galleys', [$galley]);
+
+        // Validation is exercised by the validateJats() tests; running the style checker
+        // here would only make the packaging slow to test
+        return [$plugin, $plugin->createZip($publication, $this->createJournal(), true)];
+    }
+
+    //
+    // createZip()
+    //
+
+    /**
+     * PMC supports a single level of decompression: every file sits at the top of the
+     * package, named alike, and nothing is nested in a directory.
+     *
+     * @see https://pmc.ncbi.nlm.nih.gov/pub/filespec-delivery/
+     */
+    public function testCreateZipPackagesTheXmlPdfAndMediaSideBySide(): void
+    {
+        [, $package] = $this->packageWithMedia(
+            [$this->createMediaFile(1, 11, 'figure1.tif')],
+            [11 => 'journals/1/figure1.tif'],
+            '<fig id="f1"><graphic xlink:href="figure1.tif"/></fig>'
+        );
+
+        $this->assertArrayNotHasKey('error', $package);
+
+        // The package itself carries a timestamp, which PMC reads as the revision
+        $this->assertMatchesRegularExpression('/^jtest-2025-e12345-\d{14}$/', $package['filename']);
+
+        $zip = new ZipArchive();
+        $zip->open($package['path']);
+        $names = [];
+        for ($i = 0; $i < $zip->numFiles; $i++) {
+            $names[] = $zip->getNameIndex($i);
+        }
+        $zip->close();
+        sort($names);
+
+        $this->assertSame([
+            'jtest-2025-e12345-g001.tif',
+            'jtest-2025-e12345.pdf',
+            'jtest-2025-e12345.xml',
+        ], $names);
+
+        unlink($package['path']);
+    }
+
     //
     // createZipCollection()
     //
@@ -1257,6 +1457,273 @@ class PubmedCentralExportPluginTest extends PKPTestCase
         $this->assertSame($once, $twice);
     }
 
+    /**
+     * PMC names a figure graphic -g###, an inline graphic -i### and anything else -s###,
+     * all built from the package's own name, and every file in a package has to be
+     * referenced from the XML -- so the document decides what is packaged.
+     */
+    public function testCustomJatsPointsMediaReferencesAtPackagedFiles(): void
+    {
+        $body = <<<'XML'
+            <p>Text with an <inline-graphic xlink:href="logo.png"/> in it.</p>
+            <fig id="f1"><graphic xlink:href="figure1.jpg"/></fig>
+            <fig id="f2"><graphic xlink:href="figure2.jpg"/></fig>
+            <supplementary-material xlink:href="dataset.csv"/>
+            XML;
+
+        [$result, $packaged] = $this->prepareJatsWithMedia($this->jatsWithBody($body), [
+            'logo.png' => 'journals/1/logo-hi.tif',
+            'figure1.jpg' => 'journals/1/figure1-hi.tif',
+            'figure2.jpg' => 'journals/1/figure2-hi.tif',
+            'dataset.csv' => 'journals/1/dataset.csv',
+        ]);
+
+        $this->assertIsString($result);
+        $xpath = $this->xpath($result);
+
+        $this->assertSame(
+            'jtest-2025-82-i001.tif',
+            $xpath->evaluate('string(//inline-graphic/@xlink:href)')
+        );
+        $this->assertSame(
+            'jtest-2025-82-g001.tif',
+            $xpath->evaluate('string(//fig[@id="f1"]/graphic/@xlink:href)')
+        );
+        $this->assertSame(
+            'jtest-2025-82-g002.tif',
+            $xpath->evaluate('string(//fig[@id="f2"]/graphic/@xlink:href)')
+        );
+        $this->assertSame(
+            'jtest-2025-82-s001.csv',
+            $xpath->evaluate('string(//supplementary-material/@xlink:href)')
+        );
+
+        $this->assertSame([
+            'jtest-2025-82-i001.tif' => 'journals/1/logo-hi.tif',
+            'jtest-2025-82-g001.tif' => 'journals/1/figure1-hi.tif',
+            'jtest-2025-82-g002.tif' => 'journals/1/figure2-hi.tif',
+            'jtest-2025-82-s001.csv' => 'journals/1/dataset.csv',
+        ], $packaged);
+    }
+
+    /**
+     * A file name in the document is matched however the depositor wrote it, and a file
+     * referred to twice is packaged once under one name.
+     */
+    public function testCustomJatsPackagesAFileReferencedTwiceOnce(): void
+    {
+        $body = <<<'XML'
+            <fig id="f1"><graphic xlink:href="Figure1.JPG"/></fig>
+            <fig id="f2"><graphic xlink:href="images/figure1.jpg"/></fig>
+            XML;
+
+        [$result, $packaged] = $this->prepareJatsWithMedia($this->jatsWithBody($body), [
+            'figure1.jpg' => 'journals/1/figure1.jpg',
+        ]);
+
+        $xpath = $this->xpath($result);
+        $this->assertSame(
+            ['jtest-2025-82-g001.jpg', 'jtest-2025-82-g001.jpg'],
+            array_map(
+                fn ($node) => $node->getAttribute('xlink:href'),
+                iterator_to_array($xpath->query('//graphic'))
+            )
+        );
+        $this->assertSame(['jtest-2025-82-g001.jpg' => 'journals/1/figure1.jpg'], $packaged);
+    }
+
+    /**
+     * PMC rejects a package whose XML points at a file that is not in it, so an export
+     * that cannot resolve a reference is stopped with the file named.
+     */
+    public function testCustomJatsReportsAReferenceWithNoMediaFile(): void
+    {
+        $body = '<fig id="f1"><graphic xlink:href="figure1.jpg"/></fig>';
+
+        [$result, $packaged] = $this->prepareJatsWithMedia($this->jatsWithBody($body), []);
+
+        $this->assertSame('plugins.importexport.pmc.export.failure.missingMediaFile', $result[0]);
+        $this->assertSame(
+            __('plugins.importexport.pmc.export.failure.missingMediaFile.none', ['reference' => 'figure1.jpg']),
+            $result[1]
+        );
+        $this->assertSame([], $packaged);
+    }
+
+    /**
+     * The mismatch is usually a media file whose name has drifted from the one the
+     * document was written against, so the names that are available are reported too.
+     */
+    public function testCustomJatsNamesTheAvailableMediaFilesWhenAReferenceIsUnmatched(): void
+    {
+        $body = '<fig id="f1"><graphic xlink:href="figure1.jpg"/></fig>';
+
+        [$result] = $this->prepareJatsWithMedia($this->jatsWithBody($body), [
+            'xyz_figure1.tif' => 'journals/1/aaa.tif',
+            'dataset.csv' => 'journals/1/bbb.csv',
+        ]);
+
+        $this->assertSame('plugins.importexport.pmc.export.failure.missingMediaFile', $result[0]);
+        $this->assertSame(
+            __('plugins.importexport.pmc.export.failure.missingMediaFile.available', [
+                'reference' => 'figure1.jpg',
+                'files' => 'xyz_figure1.tif, dataset.csv',
+            ]),
+            $result[1]
+        );
+    }
+
+    /**
+     * A document is often written against a file whose extension has since changed, or
+     * which was uploaded in another format, so the name without its extension is matched
+     * too. The packaged file keeps the extension of the file that was actually uploaded.
+     */
+    public function testCustomJatsMatchesAReferenceOnTheNameWithoutItsExtension(): void
+    {
+        $body = '<fig id="f1"><graphic xlink:href="figure1.tif"/></fig>';
+
+        [$result, $packaged] = $this->prepareJatsWithMedia($this->jatsWithBody($body), [
+            'figure1.jpg' => 'journals/1/figure1.jpg',
+        ]);
+
+        $this->assertIsString($result);
+        $this->assertSame(
+            'jtest-2025-82-g001.jpg',
+            $this->xpath($result)->evaluate('string(//graphic/@xlink:href)')
+        );
+        $this->assertSame(['jtest-2025-82-g001.jpg' => 'journals/1/figure1.jpg'], $packaged);
+    }
+
+    /**
+     * Packaging the wrong image is worse than stopping the export, so a name that could
+     * be answered with either of two files is no match at all.
+     */
+    public function testCustomJatsWillNotGuessBetweenMediaFilesSharingAName(): void
+    {
+        $body = '<fig id="f1"><graphic xlink:href="figure1.png"/></fig>';
+
+        [$result, $packaged] = $this->prepareJatsWithMedia($this->jatsWithBody($body), [
+            'figure1.jpg' => 'journals/1/figure1.jpg',
+            'figure1.tif' => 'journals/1/figure1.tif',
+        ]);
+
+        $this->assertSame('plugins.importexport.pmc.export.failure.missingMediaFile', $result[0]);
+        $this->assertSame([], $packaged);
+    }
+
+    /**
+     * A reference to somewhere else on the web is the depositor's to keep: there is no
+     * file of ours behind it to package.
+     */
+    public function testCustomJatsLeavesExternalReferencesAlone(): void
+    {
+        $body = '<fig id="f1"><graphic xlink:href="https://example.org/figure1.jpg"/></fig>';
+
+        [$result, $packaged] = $this->prepareJatsWithMedia($this->jatsWithBody($body), []);
+
+        $this->assertIsString($result);
+        $this->assertSame(
+            'https://example.org/figure1.jpg',
+            $this->xpath($result)->evaluate('string(//graphic/@xlink:href)')
+        );
+        $this->assertSame([], $packaged);
+    }
+
+    /**
+     * Every file in a PMC package has to be referenced from the XML, so a media file the
+     * document never mentions is not packaged.
+     */
+    public function testCustomJatsPackagesOnlyReferencedMediaFiles(): void
+    {
+        [$result, $packaged] = $this->prepareJatsWithMedia($this->jats(), [
+            'figure1.jpg' => 'journals/1/figure1.jpg',
+        ]);
+
+        $this->assertIsString($result);
+        $this->assertSame([], $packaged);
+    }
+
+    //
+    // getMediaFiles()
+    //
+
+    /**
+     * PMC asks for the highest resolution available, so a document referring to the web
+     * version of an image is answered with the high-resolution file linked to it. Both
+     * names resolve to it, because a document may refer to either.
+     */
+    public function testMediaFilesResolveToTheHighResolutionVariant(): void
+    {
+        $this->bindMediaFiles(
+            [
+                $this->createMediaFile(1, 11, 'figure1.jpg', 7, MediaVariantType::WEB),
+                $this->createMediaFile(2, 12, 'figure1.tif', 7, MediaVariantType::HIGH_RESOLUTION),
+            ],
+            [11 => 'journals/1/aaa.jpg', 12 => 'journals/1/bbb.tif']
+        );
+
+        $publication = new Publication();
+        $publication->setId(3);
+        $publication->setData('submissionId', 5);
+
+        $mediaFiles = $this->invoke($this->createPlugin(), 'getMediaFiles', [$publication]);
+
+        $this->assertSame([
+            'figure1.jpg' => 'journals/1/bbb.tif',
+            'figure1.tif' => 'journals/1/bbb.tif',
+        ], $mediaFiles);
+    }
+
+    /**
+     * A high-resolution file that was never linked to a counterpart stands for itself.
+     * Grouping the unlinked files together would key them all alike, and every one of
+     * them would resolve to whichever high-resolution file was uploaded.
+     */
+    public function testUnlinkedMediaFilesDoNotResolveToAnUnlinkedHighResolutionFile(): void
+    {
+        $this->bindMediaFiles(
+            [
+                $this->createMediaFile(1, 11, 'figure1.tif', null, MediaVariantType::HIGH_RESOLUTION),
+                $this->createMediaFile(2, 12, 'logo.png'),
+            ],
+            [11 => 'journals/1/aaa.tif', 12 => 'journals/1/bbb.png']
+        );
+
+        $publication = new Publication();
+        $publication->setId(3);
+        $publication->setData('submissionId', 5);
+
+        $mediaFiles = $this->invoke($this->createPlugin(), 'getMediaFiles', [$publication]);
+
+        $this->assertSame([
+            'figure1.tif' => 'journals/1/aaa.tif',
+            'logo.png' => 'journals/1/bbb.png',
+        ], $mediaFiles);
+    }
+
+    /**
+     * A media file with no high-resolution counterpart is packaged as it is.
+     */
+    public function testMediaFilesWithoutAVariantArePackagedAsUploaded(): void
+    {
+        $this->bindMediaFiles(
+            [$this->createMediaFile(1, 11, 'Figure1.PNG')],
+            [11 => 'journals/1/aaa.png']
+        );
+
+        $publication = new Publication();
+        $publication->setId(3);
+        $publication->setData('submissionId', 5);
+
+        $mediaFiles = $this->invoke($this->createPlugin(), 'getMediaFiles', [$publication]);
+
+        // Indexed in lower case: the document may name the file however it likes
+        $this->assertSame(
+            ['figure1.png' => 'journals/1/aaa.png'],
+            $mediaFiles
+        );
+    }
+
     //
     // JatsDocument::prepareGenerated() - PMC-specific transforms
     //
@@ -1588,17 +2055,88 @@ class PubmedCentralExportPluginTest extends PKPTestCase
     }
 
     /**
-     * Supplementary material left pointing at the web is dropped: PMC rejects a reference
-     * that cannot resolve inside the package.
+     * Body text may refer to the publication's media files the same way an uploaded
+     * document does, and those references are packaged and renamed alike.
+     */
+    public function testDefaultJatsPointsMediaReferencesAtPackagedFiles(): void
+    {
+        $body = <<<'XML'
+            <p>Text with an <inline-graphic xlink:href="logo.png"/> in it.</p>
+            <fig id="f1"><graphic xlink:href="figure1.jpg"/></fig>
+            XML;
+
+        [$result, $packaged] = $this->prepareJatsWithMedia(
+            $this->jatsWithBody($body),
+            [
+                'logo.png' => 'journals/1/logo-hi.tif',
+                'figure1.jpg' => 'journals/1/figure1-hi.tif',
+            ]
+        );
+
+        $this->assertIsString($result);
+        $xpath = $this->xpath($result);
+
+        $this->assertSame(
+            'jtest-2025-82-i001.tif',
+            $xpath->evaluate('string(//inline-graphic/@xlink:href)')
+        );
+        $this->assertSame(
+            'jtest-2025-82-g001.tif',
+            $xpath->evaluate('string(//fig[@id="f1"]/graphic/@xlink:href)')
+        );
+        $this->assertSame([
+            'jtest-2025-82-i001.tif' => 'journals/1/logo-hi.tif',
+            'jtest-2025-82-g001.tif' => 'journals/1/figure1-hi.tif',
+        ], $packaged);
+    }
+
+    public function testDefaultJatsReportsAReferenceWithNoMediaFile(): void
+    {
+        $body = '<fig id="f1"><graphic xlink:href="figure1.jpg"/></fig>';
+
+        [$result, $packaged] = $this->prepareJatsWithMedia(
+            $this->jatsWithBody($body),
+            []
+        );
+
+        $this->assertSame('plugins.importexport.pmc.export.failure.missingMediaFile', $result[0]);
+        $this->assertSame([], $packaged);
+    }
+
+    /**
+     * Supplementary material naming one of the publication's media files is deposited
+     * with the article, whether the document was generated or uploaded.
+     */
+    public function testSupplementaryMaterialResolvedToAMediaFileIsKept(): void
+    {
+        $body = '<p>Text.</p><supplementary-material xlink:href="dataset.csv"/>';
+
+        [$result, $packaged] = $this->prepareJatsWithMedia(
+            $this->jatsWithBody($body),
+            ['dataset.csv' => 'journals/1/dataset.csv']
+        );
+
+        $this->assertIsString($result);
+        $this->assertSame(
+            'jtest-2025-82-s001.csv',
+            $this->xpath($result)->evaluate('string(//supplementary-material/@xlink:href)')
+        );
+        $this->assertSame(['jtest-2025-82-s001.csv' => 'journals/1/dataset.csv'], $packaged);
+    }
+
+    /**
+     * Supplementary material left pointing at the web is dropped, and nothing is packaged
+     * for it: PMC rejects a reference that cannot resolve inside the package.
      */
     public function testSupplementaryMaterialPointingAtTheWebIsDropped(): void
     {
         $body = '<p>Text.</p><supplementary-material xlink:href="https://example.org/download/1/2/3"/>';
 
-        $result = $this->prepareJats($this->jatsWithBody($body), 'jtest.pdf');
+        [$result, $packaged] = $this->prepareJatsWithMedia($this->jatsWithBody($body), []);
 
         $this->assertIsString($result);
         $this->assertSame(0, $this->xpath($result)->query('//supplementary-material')->length);
+        $this->assertSame([], $packaged);
     }
 
     //

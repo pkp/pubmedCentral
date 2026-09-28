@@ -39,6 +39,30 @@ to disable validation for packages being sent to PubMed Central.
 Exported packages will include a PDF galley of the article if one is available in the submission's primary language.
 The plugin will add a link to the PDF in the JATS XML prior to export.
 
+### Media Files
+
+JATS XML may reference figures and other files, for example
+`<graphic xlink:href="figure1.jpg"/>`. Those files should be uploaded to the publication's media files, under the same
+file names the JATS XML refers to. The plugin packages each referenced file alongside the article and renames it to
+the scheme PubMed Central expects (`-g001` for a figure graphic, `-i001` for an inline graphic and `-s001` for
+supplementary material), updating the reference in the XML to match.
+
+If a media file is linked to a high-resolution version, the high-resolution file is the one packaged, since PubMed
+Central asks for the highest resolution available. Media files the XML does not reference are not packaged, because
+PubMed Central requires every file in a package to be referenced from the XML.
+
+A reference is matched to a media file by name, ignoring case and any folder in the reference, so
+`<graphic xlink:href="images/Figure1.JPG"/>` finds a media file named `figure1.jpg`. If no media file carries that
+name, the name without its extension is matched instead, so a reference to `figure1.tif` still finds a media file
+named `figure1.jpg` — but only where one media file carries that name, since packaging the wrong image is worse than
+stopping the export. Note that the name matched is the media file's name in OJS, which can be edited after upload: if
+it no longer matches the reference, the export stops, naming the reference and the media files that are available.
+
+Supplementary material is the one reference that may be removed rather than packaged: OJS-generated JATS points
+`<supplementary-material>` at a galley's download URL, which is not a file the plugin can package, so a reference still
+pointing at a URL once the media files are resolved is dropped. Supplementary material naming a media file is packaged
+and deposited like any other reference.
+
 For more details about PubMed Central requirements, refer to the
 [PubMed Central minimum data requirements](https://pmc.ncbi.nlm.nih.gov/pub/min_requirements/) and the
 [PubMed Central Tagging Guidelines](https://pmc.ncbi.nlm.nih.gov/tagging-guidelines/article/style/).
@@ -103,7 +127,8 @@ requirement alone, so a document prepared once and uploaded again is not changed
 | Contributors | Keeps only editors in the journal metadata, and only authors and editors in the article metadata. PubMed Central accepts no other contributor type. |
 | Contributor names | Removes `<string-name>` and unwraps `<name-alternatives>`, which PubMed Central rejects. |
 | Collection date | Adds the collection year, as described under Collection Date above. |
-| Supplementary material | Removes `<supplementary-material>` pointing at a URL, which PubMed Central cannot resolve outside the package. |
+| Media files | Renames each referenced media file to PubMed Central's scheme and repoints the reference at it, as described under Media Files above. |
+| Supplementary material | Removes `<supplementary-material>` still pointing at a URL after the media files are resolved, since PubMed Central cannot resolve a reference outside the package. |
 | PDF link | Replaces any PDF `<self-uri>` with one naming the PDF packaged alongside the XML. |
 | Related articles | Maps the `related-article-type` values PubMed Central rejects onto the nearest ones it accepts. |
 | Related objects | Rewrites the peer review `<related-object>` elements into the `document-type` and `link-type` combination PubMed Central requires. |
