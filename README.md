@@ -62,7 +62,10 @@ or from the first published version of the article when it is not assigned to an
 collection it was first published in, so publishing a new version in a later year does not move it, and the file names
 of a revised package continue to match the ones already deposited.
 
-Uploaded JATS XML is not modified, so those files should carry their own collection date.
+A document that already carries a collection date keeps the one it has, in whichever form it uses: JATS 1.2 pairs
+`@date-type` with `@publication-format`, and a document may still use the older `@pub-type`. A collection date the
+plugin adds is written in the same form as the document's own electronic publication date, since PubMed Central reads
+the two together.
 
 ### DOI Versioning
 
@@ -70,19 +73,8 @@ If DOI versioning is enabled in OJS, then the user can deposit each major versio
 
 ### Earlier Versions
 
-Only versions of record are listed for deposit. A published manuscript under review is sent to PubMed Central
-only once its version of record exists: when a version of record is deposited, any earlier published version of
-the same article that has not yet been deposited (a manuscript under review, or an earlier major version of the
-version of record) is deposited along with it, so PubMed Central receives the article's versions in order. Only
-the latest minor version of each stage and major version is sent, and versions already deposited or marked
-registered are left alone. This applies to deposits, both manual and automatic, and to Mark Registered, which
-also covers the earlier versions that would have accompanied the version of record; Export downloads just the
-selected objects. Author originals are never sent, being preprints rather than journal content.
-
-Each version is delivered separately, so a failed earlier version does not hold back the version of record. Since
-an earlier version has no row of its own, its failure is reported in the status of the version of record's row,
-for example "Deposited (earlier version failed)", as a link that opens the failure messages. Depositing the version of record again retries any earlier
-version that failed.
+Only versions of record are listed for deposit, and each is deposited on its own. Earlier versions of other stages,
+such as a published manuscript under review, are not sent to PubMed Central.
 
 ### Deposits
 
@@ -96,10 +88,34 @@ The SFTP account is optional -- Export can be used to download packages and deli
 but partially filling it in is not: either all of host, username, and password, or none. Automatic
 deposit requires a complete account. Deposit actions only appear once all three are set.
 
+## What the Plugin Changes in Your JATS
+
+Uploaded and OJS-generated JATS are prepared the same way. PubMed Central's requirements do not depend on where a
+document came from, and an uploaded document is often OJS's own JATS, saved and edited: a journal may export the
+generated JATS, add a body element, and upload the result. Every step below leaves a document that already meets the
+requirement alone, so a document prepared once and uploaded again is not changed twice.
+
+| Step | What it does |
+| --- | --- |
+| PMC journal identifier | Adds `<journal-id journal-id-type="pmc">` with the NLM title abbreviation, which the deposit is filed under. |
+| Journal identifiers | Removes every `journal-id` whose type the StyleChecker does not accept, such as the OJS and publisher identifiers. |
+| Abbreviated journal title | Adds `<abbrev-journal-title abbrev-type="nlm-ta">` with the NLM title abbreviation. |
+| Contributors | Keeps only editors in the journal metadata, and only authors and editors in the article metadata. PubMed Central accepts no other contributor type. |
+| Contributor names | Removes `<string-name>` and unwraps `<name-alternatives>`, which PubMed Central rejects. |
+| Collection date | Adds the collection year, as described under Collection Date above. |
+| Supplementary material | Removes `<supplementary-material>` pointing at a URL, which PubMed Central cannot resolve outside the package. |
+| PDF link | Replaces any PDF `<self-uri>` with one naming the PDF packaged alongside the XML. |
+| Related articles | Maps the `related-article-type` values PubMed Central rejects onto the nearest ones it accepts. |
+| Related objects | Rewrites the peer review `<related-object>` elements into the `document-type` and `link-type` combination PubMed Central requires. |
+| Empty paragraphs | Removes paragraphs PubMed Central reads as empty, including those holding only a non-breaking space. |
+| Article type | Sets `article-type` from the journal section, unless the document declares one of its own. |
+
+Every document is then validated against the JATS DTD and the PubMed Central StyleChecker. A document declaring a JATS
+version other than 1.2 skips DTD validation, with a warning, and is style checked as usual.
+
 ## Uploaded JATS XML
 
 If a publication has an uploaded JATS XML file, then that will be exported in the plugin instead of the OJS-generated JATS.
-Uploaded JATS XML files will also be validated against the DTD and StyleChecker.
 
 ## Troubleshooting
 

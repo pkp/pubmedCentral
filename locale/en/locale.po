@@ -90,9 +90,6 @@ msgstr "Unable to transform XSL for style checking."
 msgid "plugins.importexport.pmc.export.failure.xslFileNotFound"
 msgstr "Unable to transform XSL for style checking - XSL file not found."
 
-msgid "plugins.importexport.pmc.export.failure.jatsModification"
-msgstr "JATS modifications failed. The system returned errors: '{$param}'"
-
 msgid "plugins.importexport.pmc.export.failure.loadJats"
 msgstr "Failed to convert JATS to XML for modifications."
 
@@ -109,15 +106,6 @@ msgstr "Collection year (from the issue or the article's publication date)"
 
 msgid "plugins.importexport.pmc.export.failure.journalNotFound"
 msgstr "The journal this deposit was queued for could not be found."
-
-msgid "plugins.importexport.pmc.status.earlierVersionFailed"
-msgstr "Earlier version failed"
-
-msgid "plugins.importexport.pmc.status.earlierVersionFailed.withStatus"
-msgstr "{$status} (earlier version failed)"
-
-msgid "plugins.importexport.pmc.status.earlierVersionFailed.detail"
-msgstr "{$version}: {$message}"
 
 msgid "plugins.importexport.pmc.export.failure.missingMediaFile"
 msgstr ""

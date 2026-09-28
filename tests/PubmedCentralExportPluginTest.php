@@ -15,17 +15,15 @@ namespace APP\plugins\generic\pubmedCentral\tests;
 use APP\issue\Issue;
 use APP\issue\Repository as IssueRepository;
 use APP\journal\Journal;
+use APP\plugins\generic\pubmedCentral\classes\JatsDocument;
 use APP\plugins\generic\pubmedCentral\PubmedCentralExportPlugin;
 use APP\plugins\PubObjectsExportPlugin;
-use APP\publication\Collector as PublicationCollector;
 use APP\publication\enums\VersionStage;
 use APP\publication\Publication;
-use APP\publication\Repository as PublicationRepository;
 use APP\submission\Repository as SubmissionRepository;
 use APP\submission\Submission;
 use DOMDocument;
 use DOMXPath;
-use Illuminate\Support\LazyCollection;
 use PHPUnit\Framework\Attributes\CoversClass;
 use PHPUnit\Framework\Attributes\DataProvider;
 use PKP\tests\PKPTestCase;
@@ -38,7 +36,7 @@ class PubmedCentralExportPluginTest extends PKPTestCase
     /**
      * A minimal JATS document. The xlink namespace is declared here because the
      * jatsTemplate plugin declares it on generated JATS. The journal-meta is
-     * populated because modifyDefaultJats() requires it before it reaches
+     * populated because prepareGenerated() requires it before it reaches
      * article-meta.
      */
     private const JATS = <<<'XML'
@@ -66,7 +64,6 @@ class PubmedCentralExportPluginTest extends PKPTestCase
         // Drop any container binding a test may have replaced so that the next
         // resolution builds a fresh instance.
         app()->forgetInstance(IssueRepository::class);
-        app()->forgetInstance(PublicationRepository::class);
         app()->forgetInstance(SubmissionRepository::class);
         parent::tearDown();
     }
@@ -152,6 +149,14 @@ class PubmedCentralExportPluginTest extends PKPTestCase
     }
 
     /**
+     * Build the JATS fixture with a body, for the figures that only uploaded JATS carries.
+     */
+    private function jatsWithBody(string $body): string
+    {
+        return str_replace('</article>', "<body>{$body}</body></article>", $this->jats());
+    }
+
+    /**
      * Build the JATS fixture, optionally injecting elements before the abstract.
      */
     private function jats(string $extraArticleMeta = ''): string
@@ -170,33 +175,14 @@ class PubmedCentralExportPluginTest extends PKPTestCase
     }
 
     /**
-     * Call one of the two JATS modifiers, absorbing their differing signatures.
+     * Prepare a document.
      */
-    private function modifyJats(
-        string $method,
+    private function prepareJats(
         string $jats,
         string $articlePdfFilename,
         ?string $collectionYear = null
     ): string|array {
-        $args = [$jats, $articlePdfFilename];
-        if ($method === 'modifyDefaultJats') {
-            $args[] = 'J Test';
-            $args[] = $collectionYear;
-        }
-        return $this->invoke($this->createPlugin(), $method, $args);
-    }
-
-    /**
-     * modifyDefaultJats() and modifyCustomJats() carry byte-identical self-uri and
-     * empty-paragraph handling, so every test of that shared behaviour runs against
-     * both. Anything asserted here must hold for generated and uploaded JATS alike.
-     */
-    public static function jatsModifierProvider(): array
-    {
-        return [
-            'generated JATS' => ['modifyDefaultJats'],
-            'uploaded JATS' => ['modifyCustomJats'],
-        ];
+        return (new JatsDocument($jats, $articlePdfFilename))->prepare('J Test', $collectionYear);
     }
 
     //
@@ -1057,12 +1043,11 @@ class PubmedCentralExportPluginTest extends PKPTestCase
     }
 
     //
-    // modifyDefaultJats() / modifyCustomJats() - shared handling
+    // JatsDocument - handling shared by both kinds of document
     //
-    #[DataProvider('jatsModifierProvider')]
-    public function testSelfUriIsInsertedBeforeTheAbstract(string $method): void
+    public function testSelfUriIsInsertedBeforeTheAbstract(): void
     {
-        $result = $this->modifyJats($method, $this->jats(), 'jtest-12-3-45.pdf');
+        $result = $this->prepareJats($this->jats(), 'jtest-12-3-45.pdf');
 
         $this->assertIsString($result);
         $xpath = $this->xpath($result);
@@ -1079,12 +1064,11 @@ class PubmedCentralExportPluginTest extends PKPTestCase
         );
     }
 
-    #[DataProvider('jatsModifierProvider')]
-    public function testSelfUriIsInsertedBeforeAnExistingSelfUri(string $method): void
+    public function testSelfUriIsInsertedBeforeAnExistingSelfUri(): void
     {
         $jats = $this->jats('<self-uri content-type="html" xlink:href="article.html"/>');
 
-        $result = $this->modifyJats($method, $jats, 'jtest-12-3-45.pdf');
+        $result = $this->prepareJats($jats, 'jtest-12-3-45.pdf');
 
         $xpath = $this->xpath($result);
         $selfUris = $xpath->query('//article-meta/self-uri');
@@ -1094,15 +1078,14 @@ class PubmedCentralExportPluginTest extends PKPTestCase
         $this->assertSame('html', $selfUris->item(1)->getAttribute('content-type'));
     }
 
-    #[DataProvider('jatsModifierProvider')]
-    public function testExistingPdfSelfUrisAreReplaced(string $method): void
+    public function testExistingPdfSelfUrisAreReplaced(): void
     {
         $jats = $this->jats(
             '<self-uri content-type="pdf" xlink:href="old.pdf"/>' .
             '<self-uri content-type="application/pdf" xlink:href="older.pdf"/>'
         );
 
-        $result = $this->modifyJats($method, $jats, 'new.pdf');
+        $result = $this->prepareJats($jats, 'new.pdf');
 
         $xpath = $this->xpath($result);
         $selfUris = $xpath->query('//article-meta/self-uri');
@@ -1126,12 +1109,11 @@ class PubmedCentralExportPluginTest extends PKPTestCase
         );
     }
 
-    #[DataProvider('jatsModifierProvider')]
-    public function testEmptyParagraphsAreRemoved(string $method): void
+    public function testEmptyParagraphsAreRemoved(): void
     {
         $jats = $this->jats('<self-uri content-type="html" xlink:href="a.html"/><p>   </p>');
 
-        $result = $this->modifyJats($method, $jats, 'jtest.pdf');
+        $result = $this->prepareJats($jats, 'jtest.pdf');
 
         $xpath = $this->xpath($result);
         // Only the abstract's non-empty paragraph should survive.
@@ -1144,12 +1126,11 @@ class PubmedCentralExportPluginTest extends PKPTestCase
      * XPath's normalize-space() leaves that standing, but PMC counts it as empty and rejects
      * the paragraph, so emptiness has to be measured the way PMC measures it.
      */
-    #[DataProvider('jatsModifierProvider')]
-    public function testParagraphsHoldingOnlyNonBreakingSpaceAreRemoved(string $method): void
+    public function testParagraphsHoldingOnlyNonBreakingSpaceAreRemoved(): void
     {
         $jats = $this->jats("<p>\u{00A0}</p><p>\u{2003}\u{200B}</p><p>Real content.</p>");
 
-        $result = $this->modifyJats($method, $jats, 'jtest.pdf');
+        $result = $this->prepareJats($jats, 'jtest.pdf');
 
         $xpath = $this->xpath($result);
         $paragraphs = [];
@@ -1163,12 +1144,11 @@ class PubmedCentralExportPluginTest extends PKPTestCase
     /**
      * A paragraph is content to PMC as soon as it holds a child element, whatever its text.
      */
-    #[DataProvider('jatsModifierProvider')]
-    public function testParagraphsHoldingAnElementAreKept(string $method): void
+    public function testParagraphsHoldingAnElementAreKept(): void
     {
         $jats = $this->jats("<p>\u{00A0}<italic>x</italic></p>");
 
-        $result = $this->modifyJats($method, $jats, 'jtest.pdf');
+        $result = $this->prepareJats($jats, 'jtest.pdf');
 
         $this->assertSame(1, $this->xpath($result)->query('//p/italic')->length);
     }
@@ -1178,8 +1158,7 @@ class PubmedCentralExportPluginTest extends PKPTestCase
      * identifier carrying any other type - or none - stops the deposit. OJS records its own,
      * and an uploaded document may carry identifiers from wherever it was produced.
      */
-    #[DataProvider('jatsModifierProvider')]
-    public function testUnsupportedJournalIdsAreRemoved(string $method): void
+    public function testUnsupportedJournalIdsAreRemoved(): void
     {
         $jats = str_replace(
             '<journal-id journal-id-type="ojs">testjournal</journal-id>',
@@ -1190,7 +1169,7 @@ class PubmedCentralExportPluginTest extends PKPTestCase
             $this->jats()
         );
 
-        $result = $this->modifyJats($method, $jats, 'jtest.pdf');
+        $result = $this->prepareJats($jats, 'jtest.pdf');
 
         $this->assertIsString($result);
         $xpath = $this->xpath($result);
@@ -1198,7 +1177,7 @@ class PubmedCentralExportPluginTest extends PKPTestCase
         $this->assertSame(
             0,
             $xpath->query(
-                "//journal-meta/journal-id[not(@journal-id-type)"
+                '//journal-meta/journal-id[not(@journal-id-type)'
                 . " or @journal-id-type='ojs' or @journal-id-type='publisher']"
             )->length,
             'Journal identifiers PMC does not accept should have been removed'
@@ -1209,8 +1188,7 @@ class PubmedCentralExportPluginTest extends PKPTestCase
         $this->assertSame('jtest', $supported->item(0)->textContent);
     }
 
-    #[DataProvider('jatsModifierProvider')]
-    public function testMissingArticleMetaReturnsAnError(string $method): void
+    public function testMissingArticleMetaReturnsAnError(): void
     {
         $jats = '<?xml version="1.0"?><article><front><journal-meta>'
             . '<journal-id journal-id-type="ojs">testjournal</journal-id>'
@@ -1219,12 +1197,11 @@ class PubmedCentralExportPluginTest extends PKPTestCase
 
         $this->assertSame(
             ['plugins.importexport.pmc.export.failure.jatsNodeMissing', 'article-meta'],
-            $this->modifyJats($method, $jats, 'jtest.pdf')
+            $this->prepareJats($jats, 'jtest.pdf')
         );
     }
 
-    #[DataProvider('jatsModifierProvider')]
-    public function testMissingAbstractReturnsAnError(string $method): void
+    public function testMissingAbstractReturnsAnError(): void
     {
         $jats = '<?xml version="1.0"?><article><front><journal-meta>'
             . '<journal-id journal-id-type="ojs">testjournal</journal-id>'
@@ -1235,18 +1212,17 @@ class PubmedCentralExportPluginTest extends PKPTestCase
 
         $this->assertSame(
             ['plugins.importexport.pmc.export.failure.jatsNodeMissing', 'abstract'],
-            $this->modifyJats($method, $jats, 'jtest.pdf')
+            $this->prepareJats($jats, 'jtest.pdf')
         );
     }
 
-    #[DataProvider('jatsModifierProvider')]
-    public function testMalformedXmlReturnsAnError(string $method): void
+    public function testMalformedXmlReturnsAnError(): void
     {
         // The methods rely on the caller having enabled internal error handling;
         // exportXML() does this before calling them.
         $previous = libxml_use_internal_errors(true);
         try {
-            $result = $this->modifyJats($method, '<article><front>', 'jtest.pdf');
+            $result = $this->prepareJats('<article><front>', 'jtest.pdf');
         } finally {
             libxml_clear_errors();
             libxml_use_internal_errors($previous);
@@ -1255,30 +1231,38 @@ class PubmedCentralExportPluginTest extends PKPTestCase
         $this->assertSame(['plugins.importexport.pmc.export.failure.loadJats'], $result);
     }
 
+    public function testAnEmptyDocumentReturnsAnError(): void
+    {
+        $this->assertSame(
+            ['plugins.importexport.pmc.export.failure.loadJats'],
+            $this->prepareJats('', 'jtest.pdf')
+        );
+    }
+
     //
-    // modifyCustomJats() - uploaded JATS
+    // JatsDocument::prepareUploaded()
     //
 
     /**
      * Uploaded JATS is re-modified whenever a submission is re-exported, and the
-     * result has to converge. modifyDefaultJats() has no equivalent test because it
+     * result has to converge. prepareGenerated() has no equivalent test because it
      * always re-adds the pmc journal-id and abbrev-journal-title; it is only ever
      * handed freshly generated JATS.
      */
     public function testModifyCustomJatsIsIdempotent(): void
     {
-        $once = $this->modifyJats('modifyCustomJats', $this->jats(), 'jtest.pdf');
-        $twice = $this->modifyJats('modifyCustomJats', $once, 'jtest.pdf');
+        $once = $this->prepareJats($this->jats(), 'jtest.pdf');
+        $twice = $this->prepareJats($once, 'jtest.pdf');
 
         $this->assertSame($once, $twice);
     }
 
     //
-    // modifyDefaultJats() - generated JATS, PMC-specific transforms
+    // JatsDocument::prepareGenerated() - PMC-specific transforms
     //
     public function testDefaultJatsAddsThePmcJournalIdAsTheFirstChild(): void
     {
-        $result = $this->modifyJats('modifyDefaultJats', $this->jats(), 'jtest.pdf');
+        $result = $this->prepareJats($this->jats(), 'jtest.pdf');
 
         $this->assertIsString($result);
         $xpath = $this->xpath($result);
@@ -1294,7 +1278,7 @@ class PubmedCentralExportPluginTest extends PKPTestCase
 
     public function testDefaultJatsAddsTheNlmAbbrevJournalTitle(): void
     {
-        $result = $this->modifyJats('modifyDefaultJats', $this->jats(), 'jtest.pdf');
+        $result = $this->prepareJats($this->jats(), 'jtest.pdf');
 
         $xpath = $this->xpath($result);
         $abbrev = $xpath->query('//journal-title-group/abbrev-journal-title');
@@ -1312,7 +1296,7 @@ class PubmedCentralExportPluginTest extends PKPTestCase
      */
     public function testDefaultJatsAddsTheCollectionDate(): void
     {
-        $result = $this->modifyJats('modifyDefaultJats', $this->jats(), 'jtest.pdf', '2025');
+        $result = $this->prepareJats($this->jats(), 'jtest.pdf', '2025');
 
         $this->assertIsString($result);
         $xpath = $this->xpath($result);
@@ -1330,7 +1314,7 @@ class PubmedCentralExportPluginTest extends PKPTestCase
 
     public function testDefaultJatsAddsNoCollectionDateWithoutACollectionYear(): void
     {
-        $result = $this->modifyJats('modifyDefaultJats', $this->jats(), 'jtest.pdf');
+        $result = $this->prepareJats($this->jats(), 'jtest.pdf');
 
         $this->assertIsString($result);
         $this->assertSame(
@@ -1347,7 +1331,7 @@ class PubmedCentralExportPluginTest extends PKPTestCase
     {
         $jats = preg_replace('|<pub-date.*?</pub-date>|', '', $this->jats());
 
-        $result = $this->modifyJats('modifyDefaultJats', $jats, 'jtest.pdf', '2025');
+        $result = $this->prepareJats($jats, 'jtest.pdf', '2025');
 
         $this->assertIsString($result);
         $this->assertSame(0, $this->xpath($result)->query('//pub-date')->length);
@@ -1355,7 +1339,7 @@ class PubmedCentralExportPluginTest extends PKPTestCase
 
     public function testDefaultJatsSetsTheArticleType(): void
     {
-        $result = $this->modifyJats('modifyDefaultJats', $this->jats(), 'jtest.pdf');
+        $result = $this->prepareJats($this->jats(), 'jtest.pdf');
 
         $xpath = $this->xpath($result);
         $this->assertSame(
@@ -1376,7 +1360,7 @@ class PubmedCentralExportPluginTest extends PKPTestCase
             $section
         );
 
-        $result = $this->modifyJats('modifyDefaultJats', $this->jats($categories), 'jtest.pdf');
+        $result = $this->prepareJats($this->jats($categories), 'jtest.pdf');
 
         $this->assertSame(
             $articleType,
@@ -1413,7 +1397,7 @@ class PubmedCentralExportPluginTest extends PKPTestCase
             </contrib-group>
             XML;
 
-        $result = $this->modifyJats('modifyDefaultJats', $this->jats($contribGroup), 'jtest.pdf');
+        $result = $this->prepareJats($this->jats($contribGroup), 'jtest.pdf');
 
         $this->assertIsString($result);
         $xpath = $this->xpath($result);
@@ -1432,7 +1416,7 @@ class PubmedCentralExportPluginTest extends PKPTestCase
             . ' xlink:title="Data set" mimetype="text/csv"/>'
         );
 
-        $result = $this->modifyJats('modifyDefaultJats', $jats, 'jtest.pdf');
+        $result = $this->prepareJats($jats, 'jtest.pdf');
 
         $this->assertIsString($result);
         $xpath = $this->xpath($result);
@@ -1448,7 +1432,7 @@ class PubmedCentralExportPluginTest extends PKPTestCase
     {
         $jats = $this->jats(sprintf('<related-article related-article-type="%s" id="ra1"/>', $jatsType));
 
-        $result = $this->modifyJats('modifyDefaultJats', $jats, 'jtest.pdf');
+        $result = $this->prepareJats($jats, 'jtest.pdf');
 
         $xpath = $this->xpath($result);
         $this->assertSame(
@@ -1469,7 +1453,7 @@ class PubmedCentralExportPluginTest extends PKPTestCase
     {
         $jats = $this->jats('<related-article related-article-type="updated-article" id="ra1"/>');
 
-        $result = $this->modifyJats('modifyDefaultJats', $jats, 'jtest.pdf');
+        $result = $this->prepareJats($jats, 'jtest.pdf');
 
         $xpath = $this->xpath($result);
         $this->assertSame(
@@ -1478,8 +1462,7 @@ class PubmedCentralExportPluginTest extends PKPTestCase
         );
     }
 
-    #[DataProvider('jatsModifierProvider')]
-    public function testPeerReviewRelatedObjectsAreRewrittenForPmc(string $method): void
+    public function testPeerReviewRelatedObjectsAreRewrittenForPmc(): void
     {
         $subArticles = <<<'XML'
             <sub-article id="rr1" article-type="reviewer-report">
@@ -1496,8 +1479,7 @@ class PubmedCentralExportPluginTest extends PKPTestCase
             </sub-article>
             XML;
 
-        $result = $this->modifyJats(
-            $method,
+        $result = $this->prepareJats(
             str_replace('</article>', $subArticles . '</article>', $this->jats()),
             'jtest.pdf'
         );
@@ -1515,8 +1497,7 @@ class PubmedCentralExportPluginTest extends PKPTestCase
         $this->assertSame('peer-review', $reviewerReport->getAttribute('link-type'));
     }
 
-    #[DataProvider('jatsModifierProvider')]
-    public function testRelatedObjectsNamingOtherThingsAreLeftAlone(string $method): void
+    public function testRelatedObjectsNamingOtherThingsAreLeftAlone(): void
     {
         $subArticle = <<<'XML'
             <sub-article id="rr1" article-type="reviewer-report">
@@ -1527,8 +1508,7 @@ class PubmedCentralExportPluginTest extends PKPTestCase
             </sub-article>
             XML;
 
-        $result = $this->modifyJats(
-            $method,
+        $result = $this->prepareJats(
             str_replace('</article>', $subArticle . '</article>', $this->jats()),
             'jtest.pdf'
         );
@@ -1553,7 +1533,7 @@ class PubmedCentralExportPluginTest extends PKPTestCase
             </contrib-group>
             XML;
 
-        $result = $this->modifyJats('modifyDefaultJats', $this->jats($contribGroup), 'jtest.pdf');
+        $result = $this->prepareJats($this->jats($contribGroup), 'jtest.pdf');
 
         $this->assertIsString($result);
         $xpath = $this->xpath($result);
@@ -1588,8 +1568,7 @@ class PubmedCentralExportPluginTest extends PKPTestCase
             </sub-article>
             XML;
 
-        $result = $this->modifyJats(
-            'modifyDefaultJats',
+        $result = $this->prepareJats(
             str_replace('</article>', $subArticle . '</article>', $this->jats()),
             'jtest.pdf'
         );
@@ -1608,6 +1587,139 @@ class PubmedCentralExportPluginTest extends PKPTestCase
         );
     }
 
+    /**
+     * Supplementary material left pointing at the web is dropped: PMC rejects a reference
+     * that cannot resolve inside the package.
+     */
+    public function testSupplementaryMaterialPointingAtTheWebIsDropped(): void
+    {
+        $body = '<p>Text.</p><supplementary-material xlink:href="https://example.org/download/1/2/3"/>';
+
+        $result = $this->prepareJats($this->jatsWithBody($body), 'jtest.pdf');
+
+        $this->assertIsString($result);
+        $this->assertSame(0, $this->xpath($result)->query('//supplementary-material')->length);
+    }
+
+    //
+    // JatsDocument::prepare() - work a document already carries
+    //
+
+    /**
+     * A document prepared once and uploaded again is prepared again, so every step that
+     * adds something has to leave a document that already has it alone.
+     */
+    public function testThePmcJournalIdIsNotAddedTwice(): void
+    {
+        $jats = str_replace(
+            '<journal-id journal-id-type="ojs">testjournal</journal-id>',
+            '<journal-id journal-id-type="pmc">J Test</journal-id>',
+            $this->jats()
+        );
+
+        $result = $this->prepareJats($jats, 'jtest.pdf');
+
+        $this->assertIsString($result);
+        $this->assertSame(
+            1,
+            $this->xpath($result)->query("//journal-meta/journal-id[@journal-id-type='pmc']")->length
+        );
+    }
+
+    public function testTheAbbreviatedJournalTitleIsNotAddedTwice(): void
+    {
+        $jats = str_replace(
+            '<journal-title>Journal of Testing</journal-title>',
+            '<journal-title>Journal of Testing</journal-title>'
+                . '<abbrev-journal-title abbrev-type="nlm-ta">J Test</abbrev-journal-title>',
+            $this->jats()
+        );
+
+        $result = $this->prepareJats($jats, 'jtest.pdf');
+
+        $this->assertIsString($result);
+        $this->assertSame(
+            1,
+            $this->xpath($result)->query("//journal-title-group/abbrev-journal-title[@abbrev-type='nlm-ta']")->length
+        );
+    }
+
+    /**
+     * PMC reads a collection date only alongside an electronic publication date written
+     * the same way, so a document using the older @pub-type gets one to match.
+     */
+    public function testTheCollectionDateFollowsThePublicationDateSpelling(): void
+    {
+        $jats = str_replace(
+            '<pub-date publication-format="electronic" date-type="pub"><year>2026</year></pub-date>',
+            '<pub-date pub-type="epub"><day>8</day><month>1</month><year>2026</year></pub-date>',
+            $this->jats()
+        );
+
+        $result = $this->prepareJats($jats, 'jtest.pdf', '2025');
+
+        $this->assertIsString($result);
+        $xpath = $this->xpath($result);
+        $this->assertSame(
+            '2025',
+            $xpath->evaluate("string(//pub-date[@pub-type='collection']/year)")
+        );
+        $this->assertSame(
+            0,
+            $xpath->query("//pub-date[@date-type='collection']")->length,
+            'The two spellings should not be mixed in one document'
+        );
+    }
+
+    public function testACollectionDateInTheOlderSpellingIsNotDuplicated(): void
+    {
+        $jats = $this->jats('<pub-date pub-type="collection"><year>2024</year></pub-date>');
+
+        $result = $this->prepareJats($jats, 'jtest.pdf', '2025');
+
+        $this->assertIsString($result);
+        $this->assertSame(1, $this->xpath($result)->query("//pub-date[@pub-type='collection']")->length);
+        $this->assertSame(
+            0,
+            $this->xpath($result)->query("//pub-date[@date-type='collection']")->length
+        );
+    }
+
+    public function testTheCollectionDateIsNotAddedTwice(): void
+    {
+        $jats = $this->jats(
+            '<pub-date date-type="collection" publication-format="electronic"><year>2024</year></pub-date>'
+        );
+
+        $result = $this->prepareJats($jats, 'jtest.pdf', '2025');
+
+        $this->assertIsString($result);
+        $xpath = $this->xpath($result);
+        $this->assertSame(1, $xpath->query("//pub-date[@date-type='collection']")->length);
+        $this->assertSame(
+            '2024',
+            $xpath->evaluate("string(//pub-date[@date-type='collection']/year)"),
+            "The document's own collection date is left as it was written"
+        );
+    }
+
+    /**
+     * The section mapping fills in an article-type a generated document arrives without;
+     * a document that declares one keeps it.
+     */
+    public function testAnArticleTypeTheDocumentDeclaresIsKept(): void
+    {
+        $jats = str_replace('<article ', '<article article-type="case-report" ', $this->jats());
+
+        $result = $this->prepareJats($jats, 'jtest.pdf');
+
+        $this->assertIsString($result);
+        $this->assertSame(
+            'case-report',
+            $this->xpath($result)->query('/article')->item(0)->getAttribute('article-type')
+        );
+    }
+
     public function testDefaultJatsMissingJournalMetaReturnsAnError(): void
     {
         $jats = '<?xml version="1.0"?><article><front><article-meta>'
@@ -1616,260 +1728,15 @@ class PubmedCentralExportPluginTest extends PKPTestCase
 
         $this->assertSame(
             ['plugins.importexport.pmc.export.failure.jatsNodeMissing', 'journal-meta'],
-            $this->modifyJats('modifyDefaultJats', $jats, 'jtest.pdf')
+            $this->prepareJats($jats, 'jtest.pdf')
         );
     }
 
     //
-    // includePreviousUnregisteredVersions() / findUnregisteredEarlierVersions()
+    // getExportableVersionStages()
     //
-
-    /**
-     * Bind a publication repository whose collector hands back the given publications,
-     * in the order the collector would return them (by version).
-     */
-    private function bindPublicationRepository(array $publications): void
-    {
-        $collector = $this->createMock(PublicationCollector::class);
-        $collector->method('filterBySubmissionIds')->willReturnSelf();
-        $collector->method('filterByStatus')->willReturnSelf();
-        $collector->method('orderByVersion')->willReturnSelf();
-        $collector->method('getMany')->willReturn(LazyCollection::make($publications));
-
-        $publicationRepository = $this->createMock(PublicationRepository::class);
-        $publicationRepository->method('getCollector')->willReturn($collector);
-        app()->instance(PublicationRepository::class, $publicationRepository);
-    }
-
-    private function createVersion(int $id, string $stage, int $major, ?string $status = null, ?string $failedMsg = null): Publication
-    {
-        $publication = new Publication();
-        $publication->setId($id);
-        $publication->setData('submissionId', 7);
-        $publication->setData('status', Submission::STATUS_PUBLISHED);
-        $publication->setData('versionStage', $stage);
-        $publication->setData('versionMajor', $major);
-        $publication->setData('versionMinor', 0);
-        $publication->setData('pubmedCentral::status', $status);
-        $publication->setData('pubmedCentral_failedMsg', $failedMsg);
-        return $publication;
-    }
-
-    /**
-     * @return int[]
-     */
-    private function ids(array $objects): array
-    {
-        return array_map(fn ($object) => $object->getId(), $objects);
-    }
-
-    public function testEarlierVersionsAreDepositedAlongWithTheVersionOfRecord(): void
-    {
-        $vor = $this->createVersion(3, 'VoR', 2);
-        $this->bindPublicationRepository([
-            $this->createVersion(1, 'PMUR', 1),
-            $this->createVersion(2, 'VoR', 1),
-            $vor,
-        ]);
-
-        $result = $this->invoke($this->createPlugin(), 'includePreviousUnregisteredVersions', [[$vor]]);
-
-        $this->assertSame([3, 1, 2], $this->ids($result), 'The selected object comes first, then its earlier versions');
-    }
-
-    public function testAuthorOriginalsAreNeverIncluded(): void
-    {
-        $vor = $this->createVersion(3, 'VoR', 1);
-        $this->bindPublicationRepository([
-            $this->createVersion(1, 'AO', 1),
-            $this->createVersion(2, 'PMUR', 1),
-            $vor,
-        ]);
-
-        $result = $this->invoke($this->createPlugin(), 'findUnregisteredEarlierVersions', [$vor]);
-
-        $this->assertSame([2], $this->ids($result));
-    }
-
-    public function testOnlyTheLatestMinorOfEachStageAndMajorIsIncluded(): void
-    {
-        $vor = $this->createVersion(5, 'VoR', 1);
-        $this->bindPublicationRepository([
-            $this->createVersion(1, 'PMUR', 1),
-            $this->createVersion(2, 'PMUR', 1),
-            $this->createVersion(3, 'PMUR', 2),
-            $this->createVersion(4, 'PMUR', 2),
-            $vor,
-        ]);
-
-        $result = $this->invoke($this->createPlugin(), 'findUnregisteredEarlierVersions', [$vor]);
-
-        $this->assertSame([2, 4], $this->ids($result));
-    }
-
-    public function testVersionsAfterTheDepositedOneAreNotIncluded(): void
-    {
-        $firstVor = $this->createVersion(2, 'VoR', 1);
-        $this->bindPublicationRepository([
-            $this->createVersion(1, 'PMUR', 1),
-            $firstVor,
-            $this->createVersion(3, 'VoR', 2),
-        ]);
-
-        $result = $this->invoke($this->createPlugin(), 'findUnregisteredEarlierVersions', [$firstVor]);
-
-        $this->assertSame([1], $this->ids($result));
-    }
-
-    public function testAnEarlierMajorVersionOfRecordIsIncluded(): void
-    {
-        $secondVor = $this->createVersion(3, 'VoR', 2);
-        $this->bindPublicationRepository([
-            $this->createVersion(1, 'VoR', 1),
-            $this->createVersion(2, 'VoR', 1),
-            $secondVor,
-        ]);
-
-        $result = $this->invoke($this->createPlugin(), 'findUnregisteredEarlierVersions', [$secondVor]);
-
-        $this->assertSame([2], $this->ids($result), 'The latest minor of the earlier major');
-    }
-
-    #[DataProvider('registeredStatusProvider')]
-    public function testVersionsAlreadyRegisteredAreLeftAlone(string $status): void
-    {
-        $vor = $this->createVersion(3, 'VoR', 1);
-        $this->bindPublicationRepository([
-            $this->createVersion(1, 'PMUR', 1, $status),
-            $this->createVersion(2, 'PMUR', 2, PubObjectsExportPlugin::EXPORT_STATUS_ERROR),
-            $vor,
-        ]);
-
-        $result = $this->invoke($this->createPlugin(), 'findUnregisteredEarlierVersions', [$vor]);
-
-        $this->assertSame([2], $this->ids($result), 'A failed deposit is retried; a registered one is not');
-    }
-
-    public static function registeredStatusProvider(): array
-    {
-        return [
-            'deposited by the plugin' => [PubObjectsExportPlugin::EXPORT_STATUS_REGISTERED],
-            'marked registered' => [PubObjectsExportPlugin::EXPORT_STATUS_MARKEDREGISTERED],
-        ];
-    }
-
-    /**
-     * Every major version of record is listed, so two of the same article can be
-     * selected together; the earlier one must not be queued a second time as the
-     * later one's earlier version.
-     */
-    public function testAnEarlierVersionAlreadySelectedIsNotAddedTwice(): void
-    {
-        $firstVor = $this->createVersion(1, 'VoR', 1);
-        $secondVor = $this->createVersion(2, 'VoR', 2);
-        $this->bindPublicationRepository([$firstVor, $secondVor]);
-
-        $result = $this->invoke($this->createPlugin(), 'includePreviousUnregisteredVersions', [[$firstVor, $secondVor]]);
-
-        $this->assertSame([1, 2], $this->ids($result));
-    }
-
-    public function testMarkingRegisteredCoversTheEarlierVersions(): void
-    {
-        $vor = $this->createVersion(3, 'VoR', 1);
-        $this->bindPublicationRepository([
-            $this->createVersion(1, 'PMUR', 1),
-            $this->createVersion(2, 'PMUR', 2, PubObjectsExportPlugin::EXPORT_STATUS_REGISTERED),
-            $vor,
-        ]);
-
-        $plugin = $this->getMockBuilder(PubmedCentralExportPlugin::class)
-            ->disableOriginalConstructor()
-            ->onlyMethods(['getSetting', 'getPluginPath', 'updateStatus'])
-            ->getMock();
-        $plugin->method('getSetting')->willReturn(null);
-        $plugin->method('getPluginPath')->willReturn('plugins/generic/pubmedCentral');
-
-        $marked = [];
-        $plugin->method('updateStatus')->willReturnCallback(
-            function (Publication $publication, string $status) use (&$marked) {
-                $marked[$publication->getId()] = $status;
-            }
-        );
-
-        $plugin->markRegistered([$vor]);
-
-        $this->assertSame(
-            [
-                3 => PubObjectsExportPlugin::EXPORT_STATUS_MARKEDREGISTERED,
-                1 => PubObjectsExportPlugin::EXPORT_STATUS_MARKEDREGISTERED,
-            ],
-            $marked,
-            'The selected VoR and its unregistered earlier version are marked; the registered one is left alone'
-        );
-    }
-
     public function testOnlyVersionsOfRecordAreListedForDeposit(): void
     {
         $this->assertSame([VersionStage::VERSION_OF_RECORD], $this->createPlugin()->getExportableVersionStages());
-    }
-
-    public function testFailedEarlierVersionsAreFound(): void
-    {
-        $vor = $this->createVersion(4, 'VoR', 2);
-        $this->bindPublicationRepository([
-            $this->createVersion(1, 'PMUR', 1, PubObjectsExportPlugin::EXPORT_STATUS_ERROR, 'Invalid JATS'),
-            $this->createVersion(2, 'VoR', 1, PubObjectsExportPlugin::EXPORT_STATUS_REGISTERED),
-            $this->createVersion(3, 'AO', 1, PubObjectsExportPlugin::EXPORT_STATUS_ERROR, 'Never sent'),
-            $vor,
-        ]);
-
-        $result = $this->invoke($this->createPlugin(), 'findFailedEarlierVersions', [$vor]);
-
-        $this->assertSame([1], $this->ids($result), 'Only earlier versions that accompany a VoR are reported');
-    }
-
-    public function testEarlierVersionFailuresNameTheVersion(): void
-    {
-        $vor = $this->createVersion(3, 'VoR', 1);
-        $this->bindPublicationRepository([
-            $this->createVersion(1, 'PMUR', 1, PubObjectsExportPlugin::EXPORT_STATUS_ERROR, 'Invalid JATS'),
-            $this->createVersion(2, 'PMUR', 2, PubObjectsExportPlugin::EXPORT_STATUS_REGISTERED),
-            $vor,
-        ]);
-
-        $result = $this->invoke($this->createPlugin(), 'describeEarlierVersionFailures', [$vor]);
-
-        // The plugin's locale file is not loaded here, so the key is compared
-        // through __() as the convertErrorMessage() tests do; the version label
-        // resolves, since it comes from the application's own locale
-        $this->assertSame(
-            [__('plugins.importexport.pmc.status.earlierVersionFailed.detail', [
-                'version' => 'Published Manuscript Under Review 1.0',
-                'message' => 'Invalid JATS',
-            ])],
-            $result
-        );
-    }
-
-    public function testNoEarlierVersionFailuresWhenAllSucceeded(): void
-    {
-        $vor = $this->createVersion(2, 'VoR', 1);
-        $this->bindPublicationRepository([
-            $this->createVersion(1, 'PMUR', 1, PubObjectsExportPlugin::EXPORT_STATUS_REGISTERED),
-            $vor,
-        ]);
-
-        $this->assertSame([], $this->invoke($this->createPlugin(), 'describeEarlierVersionFailures', [$vor]));
-    }
-
-    public function testSubmissionsArePassedThroughUntouched(): void
-    {
-        $submission = new Submission();
-        $submission->setId(9);
-
-        $result = $this->invoke($this->createPlugin(), 'includePreviousUnregisteredVersions', [[$submission]]);
-
-        $this->assertSame([$submission], $result);
     }
 }
