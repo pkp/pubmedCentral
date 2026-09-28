@@ -11,7 +11,7 @@
  *
  * @ingroup jobs
  *
- * @brief Build an object's package and deposit it to the configured PMC FTP account.
+ * @brief Build an object's package and deposit it to the configured PMC SFTP account.
  */
 
 namespace APP\plugins\generic\pubmedCentral\jobs;

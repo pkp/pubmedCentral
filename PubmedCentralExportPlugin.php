@@ -8,27 +8,27 @@
  * Distributed under the GNU GPL v3. For full terms see the file LICENSE.
  *
  * @class PubmedCentralExportPlugin
+ *
  * @brief PubMed Central export plugin
  */
 
 namespace APP\plugins\generic\pubmedCentral;
 
+use APP\core\Application;
 use APP\facades\Repo;
 use APP\notification\NotificationManager;
 use APP\plugins\generic\pubmedCentral\classes\form\PubmedCentralSettingsForm;
+use APP\plugins\generic\pubmedCentral\classes\JatsDocument;
 use APP\plugins\generic\pubmedCentral\jobs\PubmedCentralDeliver;
 use APP\plugins\PubObjectsExportPlugin;
 use APP\publication\Publication;
 use APP\submission\Submission;
 use APP\template\TemplateManager;
 use DOMDocument;
-use DOMElement;
-use DOMNode;
-use DOMXPath;
 use Exception;
 use League\Flysystem\Filesystem;
-use League\Flysystem\Ftp\FtpAdapter;
-use League\Flysystem\Ftp\FtpConnectionOptions;
+use League\Flysystem\PhpseclibV3\SftpAdapter;
+use League\Flysystem\PhpseclibV3\SftpConnectionProvider;
 use PKP\context\Context;
 use PKP\core\Core;
 use PKP\core\JSONMessage;
@@ -40,6 +40,8 @@ use PKP\plugins\interfaces\HasTaskScheduler;
 use PKP\scheduledTask\PKPScheduler;
 use PKP\submission\Genre;
 use PKP\submission\GenreDAO;
+use PKP\submissionFile\enums\MediaVariantType;
+use PKP\submissionFile\SubmissionFile;
 use PKP\xslt\XSLTransformer;
 use ZipArchive;
 
@@ -54,19 +56,17 @@ class PubmedCentralExportPlugin extends PubObjectsExportPlugin implements HasTas
     protected const JATS_12_DTD_PATH = '/dtd/jats/1.2/JATS-journalpublishing1.dtd';
 
     /**
-     * JATS related-article-type values PMC does not accept, mapped to the nearest
-     * value its style checker allows.
-     */
-    protected const PMC_RELATED_ARTICLE_TYPES = [
-        'expression-of-concern' => 'object-of-concern',
-        'partial-retraction' => 'retracted-article',
-    ];
-
-    /**
      * Message keys for conditions that do not stop an export but should still be
      * reported, collected across every object in the export and de-duplicated.
      */
     protected array $validationWarnings = [];
+
+    /**
+     * The media files the document being exported refers to, as
+     * [packaged file name => path in the file store]. Taken from the prepared document,
+     * and read by createZip() to add each file to the package.
+     */
+    protected array $packagedMedia = [];
 
     /**
      * @copydoc ImportExportPlugin::display()
@@ -76,7 +76,7 @@ class PubmedCentralExportPlugin extends PubObjectsExportPlugin implements HasTas
         parent::display($args, $request);
         $templateManager = TemplateManager::getManager();
         $templateManager->assign([
-            'ftpLibraryMissing' => !class_exists('\League\Flysystem\Ftp\FtpAdapter'),
+            'sftpLibraryMissing' => !class_exists('\League\Flysystem\PhpseclibV3\SftpAdapter'),
         ]);
 
         switch (array_shift($args)) {
@@ -91,11 +91,20 @@ class PubmedCentralExportPlugin extends PubObjectsExportPlugin implements HasTas
     /**
      * Create a filename for files created in the plugin, removing any invalid characters.
      * The naming scheme is determined by the journal's "namingType" setting:
-     *  - volumeIssue: nlmTitle-volume-issue-firstPage(-timestamp)
-     *  - articleNumber: nlmTitle-collectionYear-articleNumber(-timestamp)
+     *  - volumeIssue: nlmTitle-volume-issue-firstPage(.vVersion)(-timestamp)
+     *  - articleNumber: nlmTitle-collectionYear-articleNumber(.vVersion)(-timestamp)
      *
      * PMC organizes its archive by volume, so where a journal publishes by article
-     * number and carries no volumes, the collection year takes the volume's place.
+     * number and carries no volumes, the collection year takes the volume's place. The
+     * article number or first page is PMC's "uid", the last part before any timestamp.
+     *
+     * The version identifies which version of an article a package holds, and separates
+     * one version's files from another's: every name here is derived from the publication,
+     * so without it two versions of the same article produce the same package name and the
+     * same names inside it. It sits inside the uid rather than beside it, because PMC reads
+     * the uid as a single part. A publication carrying no version number is named as before.
+     *
+     * @see https://pmc.ncbi.nlm.nih.gov/pub/filespec-delivery/
      *
      * @param bool $ts Whether to include a timestamp in the filename.
      * @param string|null $fileExtension The optional file extension to include in the filename.
@@ -114,22 +123,30 @@ class PubmedCentralExportPlugin extends PubObjectsExportPlugin implements HasTas
             $namingType = $this->getSetting($context->getId(), 'namingType') ?: 'volumeIssue';
             if ($namingType === 'articleNumber') {
                 $parts[] = $this->collectionYear($object);
-                $parts[] = $publication->getData('articleNumber');
+                $uid = (string) $publication->getData('articleNumber');
             } else {
                 $issue = Repo::issue()->get($publication->getIssueId());
                 $parts[] = $issue->getVolume();
                 $parts[] = $issue->getNumber();
-                $parts[] = $publication->getStartingPage();
+                $uid = (string) $publication->getStartingPage();
             }
+
+            // PMC reads the uid as a single part of the name (jour-vol-uid-timestamp), so an
+            // article's version belongs inside it rather than beside it: "82.v2", not "82-v2".
+            if ($uid !== '' && ($version = $publication->getData('versionMajor'))) {
+                $uid .= '.v' . $version;
+            }
+            $parts[] = $uid;
         }
 
         if ($ts) {
             $parts[] = date('YmdHis');
         }
 
-        // PMC file names cannot contain spaces or special characters (such as ?, %, #, /, or :)
+        // PMC file names cannot contain spaces or special characters (such as ?, %, #, /, or :).
+        // A dot is not among them, and PMC's own example uids carry one (e.g. "bt.12345").
         $parts = array_map(
-            fn ($part) => preg_replace('/[^a-zA-Z0-9]/', '', (string) $part),
+            fn ($part) => trim(preg_replace('/[^a-zA-Z0-9.]/', '', (string) $part), '.'),
             $parts
         );
 
@@ -143,7 +160,7 @@ class PubmedCentralExportPlugin extends PubObjectsExportPlugin implements HasTas
      * The four-digit year of the collection an article belongs to.
      *
      * An article stays in the collection it was first published in, even when a later
-     * version is published in another year, so the year is taken from the issue, and
+     * version is published in another year. The year is taken from the issue, or
      * from the first published version of the submission where there is no issue.
      */
     protected function collectionYear(Submission|Publication|null $object): ?string
@@ -172,7 +189,55 @@ class PubmedCentralExportPlugin extends PubObjectsExportPlugin implements HasTas
     }
 
     /**
+     * The publication's media files, indexed by the file names a document would refer to
+     * them by.
+     *
+     * Where a media file is linked to a high-resolution variant, that variant is what
+     * gets packaged: PMC asks for the highest resolution available, and both names
+     * resolve to it so the document may refer to either one.
+     *
+     * @return array<string, string> Paths in the file store, keyed by lowercased file name
+     */
+    protected function getMediaFiles(Publication $publication): array
+    {
+        $fileService = app()->get('file');
+
+        // Collected rather than left lazy: the files are walked twice, and re-iterating
+        // a lazy collection would run the query again
+        $mediaFiles = Repo::submissionFile()
+            ->getCollector()
+            ->filterBySubmissionIds([$publication->getData('submissionId')])
+            ->filterByFileStages([SubmissionFile::SUBMISSION_FILE_MEDIA])
+            ->filterByAssoc(Application::ASSOC_TYPE_PUBLICATION, [$publication->getId()])
+            ->getMany()
+            ->collect();
+
+        // Only a file linked to a variant group answers for its counterpart. An unlinked
+        // one stands for itself: grouping those together would key them all as one.
+        $highResolution = $mediaFiles
+            ->filter(fn (SubmissionFile $file) => $file->getData('variantGroupId')
+                && $file->getData('variantType') === MediaVariantType::HIGH_RESOLUTION->value)
+            ->keyBy(fn (SubmissionFile $file) => $file->getData('variantGroupId'));
+
+        $files = [];
+        foreach ($mediaFiles as $mediaFile) { /** @var SubmissionFile $mediaFile */
+            $packagedFile = $highResolution->get($mediaFile->getData('variantGroupId')) ?? $mediaFile;
+            $path = $fileService->get($packagedFile->getData('fileId'))->path;
+
+            // The name is the only record of the file name the document was written
+            // against: what is stored on disk is a generated name.
+            foreach ((array) $mediaFile->getData('name') as $name) {
+                $files[strtolower($name)] = $path;
+            }
+        }
+
+        return $files;
+    }
+
+    /**
      * @copydoc PubObjectsExportPlugin::executeExportAction()
+     *
+     * @param null|mixed $noValidation
      *
      * @throws Exception
      */
@@ -258,6 +323,10 @@ class PubmedCentralExportPlugin extends PubObjectsExportPlugin implements HasTas
     /**
      * Get the XML for selected objects.
      *
+     * @param null|mixed $noValidation
+     * @param null|mixed $outputErrors
+     * @param null|mixed $genres
+     *
      * @return array|string array of error message, or XML document.
      */
     public function exportXML(
@@ -303,26 +372,29 @@ class PubmedCentralExportPlugin extends PubObjectsExportPlugin implements HasTas
         }
 
         $xml = $document->jatsContent;
-        $errors = array_filter(libxml_get_errors(), function ($a) {
-            return $a->level == LIBXML_ERR_ERROR || $a->level == LIBXML_ERR_FATAL;
-        });
-        if (!empty($errors)) {
-            $libXmlErrors = implode(PHP_EOL, $errors);
-            return ['plugins.importexport.pmc.export.failure.jatsModification', $libXmlErrors];
-        }
+
+        // Building the document leaves its own parse errors behind: the JATS Template
+        // plugin recovers from malformed author markup itself, and a document that could
+        // not be loaded at all is reported above. Cleared so that the DTD validation
+        // reports only what it found.
         libxml_clear_errors();
 
-        // If the JATS document is system-generated, modify it to ensure it meets PMC requirements.
-        if ($document->isDefaultContent) {
-            $returnXml = $this->modifyDefaultJats(
-                $xml,
-                $articlePdfFilename,
-                $nlmTitle,
-                $this->collectionYear($object)
-            );
-        } else {
-            $returnXml = $this->modifyCustomJats($xml, $articlePdfFilename);
-        }
+        // Prepare the document to meet PMC requirements, which is also what decides
+        // which of the publication's media files are packaged, and under what names.
+        // @todo Warn the depositor when a media file is left out because nothing refers to
+        // it, or when one marked as the web version is packaged because no high-resolution
+        // version is linked to it. Warnings raised during an export only appear once the
+        // page is reloaded, as the export responds with the download rather than a page,
+        // and a deposit's queued job does not report warnings at all.
+        $nlmTitle ??= $this->nlmTitle($context);
+        $jatsDocument = new JatsDocument(
+            $xml,
+            $articlePdfFilename,
+            $this->getMediaFiles($publication),
+            $this->buildFileName($nlmTitle, $context, $object)
+        );
+        $returnXml = $jatsDocument->prepare($nlmTitle, $this->collectionYear($object));
+        $this->packagedMedia = $jatsDocument->getPackagedMedia();
 
         if (is_array($returnXml)) {
             return $returnXml;
@@ -389,7 +461,7 @@ class PubmedCentralExportPlugin extends PubObjectsExportPlugin implements HasTas
     }
 
     /**
-     * Whether the FTP account has everything required to deposit to it.
+     * Whether the SFTP account has everything required to deposit to it.
      */
     public function hasCompleteConnectionSettings(int $contextId): bool
     {
@@ -401,7 +473,7 @@ class PubmedCentralExportPlugin extends PubObjectsExportPlugin implements HasTas
     }
 
     /**
-     * Whether an FTP account (host/username/password) is fully filled in. The account
+     * Whether an SFTP account (host/username/password) is fully filled in. The account
      * is optional -- a journal may use the plugin for Export only and deliver packages
      * to PMC by hand -- but if any of the three is set, all three must be.
      */
@@ -441,20 +513,24 @@ class PubmedCentralExportPlugin extends PubObjectsExportPlugin implements HasTas
     }
 
     /**
-     * Write a package to the configured PMC FTP account.
+     * Write a package to the configured PMC SFTP account.
      *
      * @throws Exception If the package cannot be read, or the upload fails.
      */
     public function deliverToEndpoint(string $path, string $filename, Context $context): void
     {
         $settings = $this->getConnectionSettings($context);
-        $adapter = new FtpAdapter(FtpConnectionOptions::fromArray([
-            'host' => $settings['host'],
-            'port' => (int) $settings['port'] ?: 21,
-            'username' => $settings['username'],
-            'password' => $settings['password'],
-            'root' => $settings['path'],
-        ]));
+        $adapter = new SftpAdapter(
+            new SftpConnectionProvider(
+                $settings['host'],
+                $settings['username'],
+                $settings['password'],
+                null,
+                null,
+                (int) $settings['port'] ?: 22
+            ),
+            $settings['path'] ?: '/'
+        );
 
         $fp = fopen($path, 'r');
         if (!$fp) {
@@ -501,8 +577,6 @@ class PubmedCentralExportPlugin extends PubObjectsExportPlugin implements HasTas
             return ['error' => $error];
         }
 
-        $filename = $this->buildFileName($nlmTitle, $context, $object);
-
         // Add a PDF article galley file
         $pdfFilesFound = 0;
         $articlePdfFilename = null;
@@ -535,11 +609,10 @@ class PubmedCentralExportPlugin extends PubObjectsExportPlugin implements HasTas
                 continue;
             }
 
-            // @todo make sure files meet 2GB max size requirement?
             $galleyPath = $fileService->get($galleyFile->getData('fileId'))->path;
             $extension = pathinfo($galleyPath, PATHINFO_EXTENSION);
             $galleyFilename = $this->buildFileName($nlmTitle, $context, $object, false, $extension);
-            $galleyFilePath = $filename . '/' . $galleyFilename;
+            $galleyFilePath = $galleyFilename;
             $articlePdfFilename = $galleyFilename;
 
             if ($pdfFilesFound > 0) {
@@ -565,19 +638,9 @@ class PubmedCentralExportPlugin extends PubObjectsExportPlugin implements HasTas
             $pdfFilesFound++;
         }
 
-        // @todo High-resolution media files are not packaged. PMC requires every file
-        // in a package to be referenced from the XML, and nothing references them
-        // today: generated JATS contains no <graphic> elements for them, and uploaded
-        // JATS references the depositor's own filenames. Reinstating this needs, at a
-        // minimum: a per-file component in the packaged name (buildFileName() is
-        // derived from the publication, so every media file would otherwise collide
-        // and ZipArchive would silently keep only the last), a flat
-        // [sourceName => packagedName] map, rewriting //graphic/@xlink:href in
-        // modifyCustomJats(), and reporting the unused
-        // plugins.importexport.pmc.export.failure.missingMediaFile error when the XML
-        // references a file that was not uploaded.
-
-        // Add article XML to the zip
+        // Add article XML to the zip. Modifying the document is what decides which of
+        // the publication's media files are packaged, and under what names, so the
+        // media files are added afterwards.
         $document = $this->exportXML(
             $object,
             null,
@@ -591,7 +654,7 @@ class PubmedCentralExportPlugin extends PubObjectsExportPlugin implements HasTas
         if (is_array($document)) {
             return $this->discardZip($zip, $zipPath, $document);
         } else {
-            $articlePathName = $filename . '/' . $this->buildFileName($nlmTitle, $context, $object, false, 'xml');
+            $articlePathName = $this->buildFileName($nlmTitle, $context, $object, false, 'xml');
             if (!$zip->addFromString($articlePathName, $document)) {
                 return $this->discardZip(
                     $zip,
@@ -599,6 +662,16 @@ class PubmedCentralExportPlugin extends PubObjectsExportPlugin implements HasTas
                     ['plugins.importexport.pmc.export.failure.addingFile', $zip->getStatusString()]
                 );
             }
+            foreach ($this->packagedMedia as $packagedName => $mediaPath) {
+                if (!$zip->addFromString($packagedName, $fileService->fs->read($mediaPath))) {
+                    return $this->discardZip(
+                        $zip,
+                        $zipPath,
+                        ['plugins.importexport.pmc.export.failure.addingFile', $zip->getStatusString()]
+                    );
+                }
+            }
+
             $zipDetails['filename'] = $this->buildFileName($nlmTitle, $context, $object, true);
             $zipDetails['path'] = $zipPath;
             $zip->close();
@@ -825,241 +898,6 @@ class PubmedCentralExportPlugin extends PubObjectsExportPlugin implements HasTas
     }
 
     /**
-     * Modify the JATS XML to meet PMC requirements.
-     *
-     * @todo High-resolution media files are not supported for system-generated JATS.
-     * The generated document contains no <graphic> elements to point at them, and
-     * there is no way to determine where in the body each image belongs. Only
-     * uploaded JATS carries its own <graphic> elements -- see modifyCustomJats() and
-     * the note in createZip(). Revisit if generated JATS gains figure support.
-     */
-    protected function modifyDefaultJats(
-        string $importedJats,
-        string $articlePdfFilename,
-        string $nlmTitle,
-        ?string $collectionYear = null
-    ): string|array {
-        $dom = new DOMDocument();
-        $dom->preserveWhiteSpace = false;
-
-        if (!$dom->loadXML($importedJats)) {
-            return ['plugins.importexport.pmc.export.failure.loadJats'];
-        }
-
-        $xpath = new DOMXPath($dom);
-
-        if (!($journalMetaNode = $xpath->query('//article/front/journal-meta')->item(0))) {
-            return ['plugins.importexport.pmc.export.failure.jatsNodeMissing', 'journal-meta'];
-        }
-
-        // Add Journal identifier for pmc and remove unsupported journal identifiers
-        $journalIdNode = $dom->createElement('journal-id', $nlmTitle);
-        $journalIdNode->setAttribute('journal-id-type', 'pmc');
-        if (!$journalMetaChildElement = $xpath->query('*[1]', $journalMetaNode)->item(0)) {
-            return ['plugins.importexport.pmc.export.failure.jatsNodeMissing', 'journal-meta[1]'];
-        }
-        $journalMetaNode->insertBefore($journalIdNode, $journalMetaChildElement);
-        $journalIdNodes = $xpath->query(
-            "journal-id[@journal-id-type='ojs' or @journal-id-type='publisher']",
-            $journalMetaNode
-        );
-        foreach ($journalIdNodes as $node) { /** @var DOMNode $node **/
-            $node->parentNode->removeChild($node);
-        }
-
-        // Add NLM title as the abbreviated journal title
-        $nlmJournalTitleNode = $dom->createElement('abbrev-journal-title');
-        $nlmJournalTitleNode->setAttribute('abbrev-type', 'nlm-ta');
-        $nlmJournalTitleNode->appendChild($dom->createTextNode($nlmTitle));
-        if (!$journalTitleNode = $xpath->query("journal-title-group", $journalMetaNode)->item(0)) {
-            return ['plugins.importexport.pmc.export.failure.jatsNodeMissing', 'journal-title-group'];
-        }
-        $journalTitleNode->appendChild($nlmJournalTitleNode);
-
-        // remove contrib in journal-meta if not an editor (only author or editor type is allowed)
-        $journalContribNodes = $xpath->query(
-            "contrib-group/contrib[not(@contrib-type='editor')]",
-            $journalMetaNode
-        );
-        foreach ($journalContribNodes as $node) { /** @var DOMNode $node **/
-            $node->parentNode->removeChild($node);
-        }
-
-        // If the journal-meta contrib-group is now empty, remove it
-        foreach ($xpath->query('//contrib-group[not(*) and not(normalize-space())]', $journalMetaNode) as $node) {
-            $node->parentNode->removeChild($node);
-        }
-
-        if (!$articleMetaNode = $xpath->query("//article/front/article-meta")->item(0)) {
-            return ['plugins.importexport.pmc.export.failure.jatsNodeMissing', 'article-meta'];
-        }
-
-        // The style check only accepts author or editor, so drop every other contributor
-        // type the contributor roles can produce (translator, reviewer, reader, other...).
-        $articleContribNodes = $xpath->query(
-            "contrib-group/contrib[not(@contrib-type='author' or @contrib-type='editor')]",
-            $articleMetaNode
-        );
-        foreach ($articleContribNodes as $node) { /** @var DOMNode $node **/
-            $node->parentNode->removeChild($node);
-        }
-
-        // If the article-meta contrib-group is now empty, remove it
-        foreach ($xpath->query('//contrib-group[not(*) and not(normalize-space())]', $articleMetaNode) as $node) {
-            $node->parentNode->removeChild($node);
-        }
-
-        // The jatsTemplate plugin wraps every personal name in name-alternatives, holding the
-        // structured <name> and, where one is recorded, a display <string-name>. PMC rejects
-        // string-name, and name-alternatives needs more than one child, so drop the display
-        // name and unwrap the structured one. @specific-use only distinguished the two, so it
-        // goes with the wrapper. Queried document-wide to cover contributors in sub-article
-        // front-stubs as well as article-meta.
-        foreach ($xpath->query('//contrib-group/contrib/name-alternatives') as $node) { /** @var DOMNode $node **/
-            foreach ($xpath->query('./string-name', $node) as $stringNameNode) {
-                $node->removeChild($stringNameNode);
-            }
-            $names = $xpath->query('./name', $node);
-            if ($names->length !== 1) {
-                continue;
-            }
-            $nameNode = $names->item(0); /** @var DOMElement $nameNode */
-            $nameNode->removeAttribute('specific-use');
-            $node->parentNode->insertBefore($nameNode, $node);
-            $node->parentNode->removeChild($node);
-        }
-
-        // PMC requires the electronic publication date to be accompanied by the date of
-        // the collection the article belongs to, and uses it to organize the archive.
-        // Only the year is needed: PMC collects by year where a journal has no volumes.
-        if ($collectionYear) {
-            $pubDateNode = $xpath->query(
-                "pub-date[@date-type='pub' and @publication-format='electronic']",
-                $articleMetaNode
-            )->item(0);
-            if ($pubDateNode) {
-                $collectionDateNode = $dom->createElement('pub-date');
-                $collectionDateNode->setAttribute('date-type', 'collection');
-                $collectionDateNode->setAttribute('publication-format', 'electronic');
-                $collectionDateNode->appendChild($dom->createElement('year', $collectionYear));
-                // Kept alongside the publication date, before the volume and page elements
-                // the JATS content model expects to follow it.
-                $articleMetaNode->insertBefore($collectionDateNode, $pubDateNode->nextSibling);
-            }
-        }
-
-        // The jatsTemplate plugin points supplementary-material at the galley's OJS download
-        // URL, but createZip() packages only the article PDF. PMC requires the target to be a
-        // packaged file, and the style check rejects an @xlink:href with no file extension
-        // outright, so drop these rather than ship a reference that cannot resolve.
-        // @todo Point these at packaged files once supplementary files are packaged -- see
-        // the note in createZip().
-        foreach ($xpath->query('//supplementary-material') as $node) { /** @var DOMNode $node **/
-            $node->parentNode->removeChild($node);
-        }
-
-        // Replace any self-uri PDF links with one pointing at the PDF packaged
-        // alongside this XML. createZip() cannot produce a package without one.
-        $selfUriPdfNodes = $xpath->query(
-            "self-uri[@content-type='pdf' or @content-type='application/pdf']",
-            $articleMetaNode
-        );
-        foreach ($selfUriPdfNodes as $selfUriPdfNode) {
-            $selfUriPdfNode->parentNode->removeChild($selfUriPdfNode);
-        }
-
-        $linkElement = $dom->createElement('self-uri');
-        $linkElement->setAttribute('content-type', 'pdf');
-        $linkElement->setAttribute('xlink:href', $articlePdfFilename);
-        $uriNode = $xpath->query("self-uri", $articleMetaNode)->item(0);
-        if ($uriNode) {
-            $uriNode->parentNode->insertBefore($linkElement, $uriNode);
-        } else {
-            if (!$abstractNode = $xpath->query("abstract", $articleMetaNode)->item(0)) {
-                return ['plugins.importexport.pmc.export.failure.jatsNodeMissing', 'abstract'];
-            }
-            $articleMetaNode->insertBefore($linkElement, $abstractNode);
-        }
-
-        // PMC accepts a narrower related-article-type vocabulary than JATS, so map the
-        // values it rejects onto its nearest supported ones.
-        foreach (self::PMC_RELATED_ARTICLE_TYPES as $jatsType => $pmcType) {
-            foreach ($xpath->query("//related-article[@related-article-type='{$jatsType}']") as $node) {
-                $node->setAttribute('related-article-type', $pmcType);
-            }
-        }
-
-        // Remove any empty <p> tags, e.g. from line breaks
-        foreach ($xpath->query('//p[not(*) and not(normalize-space())]') as $node) {
-            $node->parentNode->removeChild($node);
-        }
-
-        // Add the article-type to the article element
-        $articleNode = $dom->documentElement;
-        if ($articleNode instanceof DOMElement) {
-            $articleNode->setAttribute('article-type', 'research-article');
-        }
-
-        return $dom->saveXML();
-    }
-
-    /**
-     * Modify an uploaded JATS document to meet PMC requirements.
-     *
-     * @todo Uploaded JATS may reference figures via <graphic xlink:href="...">, but
-     * the referenced files are not packaged -- see the note in createZip(). Once
-     * media packaging is reinstated, those hrefs need remapping to the packaged
-     * filenames here.
-     */
-    protected function modifyCustomJats(
-        string $importedJats,
-        string $articlePdfFilename
-    ): string|array {
-        $dom = new DOMDocument();
-        $dom->preserveWhiteSpace = false;
-
-        if (!$dom->loadXML($importedJats)) {
-            return ['plugins.importexport.pmc.export.failure.loadJats'];
-        }
-
-        $xpath = new DOMXPath($dom);
-
-        if (!$articleMetaNode = $xpath->query("//article/front/article-meta")->item(0)) {
-            return ['plugins.importexport.pmc.export.failure.jatsNodeMissing', 'article-meta'];
-        }
-
-        // Replace any self-uri PDF links with one pointing at the PDF packaged
-        // alongside this XML. createZip() cannot produce a package without one.
-        $selfUriPdfNodes = $xpath->query(
-            "self-uri[@content-type='pdf' or @content-type='application/pdf']",
-            $articleMetaNode
-        );
-        foreach ($selfUriPdfNodes as $selfUriPdfNode) {
-            $selfUriPdfNode->parentNode->removeChild($selfUriPdfNode);
-        }
-
-        $linkElement = $dom->createElement('self-uri');
-        $linkElement->setAttribute('content-type', 'pdf');
-        $linkElement->setAttribute('xlink:href', $articlePdfFilename);
-        $uriNode = $xpath->query("self-uri", $articleMetaNode)->item(0);
-        if ($uriNode) {
-            $uriNode->parentNode->insertBefore($linkElement, $uriNode);
-        } else {
-            if (!$abstractNode = $xpath->query("abstract", $articleMetaNode)->item(0)) {
-                return ['plugins.importexport.pmc.export.failure.jatsNodeMissing', 'abstract'];
-            }
-            $articleMetaNode->insertBefore($linkElement, $abstractNode);
-        }
-
-        // Remove any empty p tags, e.g. from line breaks
-        foreach ($xpath->query('//p[not(*) and not(normalize-space())]') as $node) {
-            $node->parentNode->removeChild($node);
-        }
-
-        return $dom->saveXML();
-    }
-
-    /**
      * Resolve the JATS 1.2 publishing DTD, and the modules it includes, to the copy
      * bundled with the application, so that validation does not depend on a request to
      * jats.nlm.nih.gov. Any other document type is fetched as before.
@@ -1145,7 +983,7 @@ class PubmedCentralExportPlugin extends PubObjectsExportPlugin implements HasTas
                 $errors = libxml_get_errors();
                 $validationErrors = [];
                 foreach ($errors as $error) {
-                    $validationErrors[] = "DTD Error [line $error->line]: " . trim($error->message);
+                    $validationErrors[] = "DTD Error [line {$error->line}]: " . trim($error->message);
                 }
                 libxml_clear_errors();
                 return implode(PHP_EOL, $validationErrors);

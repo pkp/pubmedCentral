@@ -43,7 +43,7 @@ class PubmedCentralSettingsForm extends PubObjectsExportSettingsForm
                 'plugins.importexport.pmc.settings.form.nlmTitleRequired'
             )
         );
-        // The FTP account is optional (Export-only use is valid), but partially
+        // The SFTP account is optional (Export-only use is valid), but partially
         // filling it in is not -- either all of host/username/password, or none.
         // The check is attached to each of the three so that whichever ones were
         // filled in are the ones flagged.

@@ -15,15 +15,29 @@ namespace APP\plugins\generic\pubmedCentral\tests;
 use APP\issue\Issue;
 use APP\issue\Repository as IssueRepository;
 use APP\journal\Journal;
+use APP\plugins\generic\pubmedCentral\classes\JatsDocument;
 use APP\plugins\generic\pubmedCentral\PubmedCentralExportPlugin;
 use APP\plugins\PubObjectsExportPlugin;
+use APP\publication\enums\VersionStage;
 use APP\publication\Publication;
 use APP\submission\Repository as SubmissionRepository;
 use APP\submission\Submission;
+use APP\submissionFile\Repository as SubmissionFileRepository;
+use PKP\db\DAORegistry;
+use PKP\galley\Galley;
+use PKP\jats\JatsFile;
+use PKP\jats\Repository as JatsRepository;
+use PKP\submission\Genre;
+use PKP\submission\GenreDAO;
 use DOMDocument;
 use DOMXPath;
+use Illuminate\Support\LazyCollection;
 use PHPUnit\Framework\Attributes\CoversClass;
 use PHPUnit\Framework\Attributes\DataProvider;
+use PHPUnit\Framework\MockObject\MockObject;
+use PKP\submissionFile\Collector as SubmissionFileCollector;
+use PKP\submissionFile\enums\MediaVariantType;
+use PKP\submissionFile\SubmissionFile;
 use PKP\tests\PKPTestCase;
 use ReflectionMethod;
 use ZipArchive;
@@ -34,7 +48,7 @@ class PubmedCentralExportPluginTest extends PKPTestCase
     /**
      * A minimal JATS document. The xlink namespace is declared here because the
      * jatsTemplate plugin declares it on generated JATS. The journal-meta is
-     * populated because modifyDefaultJats() requires it before it reaches
+     * populated because prepareGenerated() requires it before it reaches
      * article-meta.
      */
     private const JATS = <<<'XML'
@@ -63,7 +77,18 @@ class PubmedCentralExportPluginTest extends PKPTestCase
         // resolution builds a fresh instance.
         app()->forgetInstance(IssueRepository::class);
         app()->forgetInstance(SubmissionRepository::class);
+        app()->forgetInstance(SubmissionFileRepository::class);
+        app()->forgetInstance(JatsRepository::class);
+        app()->forgetInstance('file');
         parent::tearDown();
+    }
+
+    /**
+     * @copydoc PKPTestCase::getMockedDAOs()
+     */
+    protected function getMockedDAOs(): array
+    {
+        return ['GenreDAO'];
     }
 
     //
@@ -147,6 +172,89 @@ class PubmedCentralExportPluginTest extends PKPTestCase
     }
 
     /**
+     * Bind a submission file repository handing back the given media files, and a file
+     * service resolving each file id to a path.
+     *
+     * @param array $paths [file id => path in the file store]
+     */
+    private function bindMediaFiles(array $mediaFiles, array $paths): MockObject
+    {
+        $collector = $this->createMock(SubmissionFileCollector::class);
+        foreach (['filterBySubmissionIds', 'filterByFileStages', 'filterByAssoc'] as $filter) {
+            $collector->method($filter)->willReturnSelf();
+        }
+        $collector->method('getMany')->willReturn(LazyCollection::make($mediaFiles));
+
+        $submissionFileRepository = $this->createMock(SubmissionFileRepository::class);
+        $submissionFileRepository->method('getCollector')->willReturn($collector);
+        app()->instance(SubmissionFileRepository::class, $submissionFileRepository);
+
+        // Stands in for the file store: resolves a file id to its path, and reads the
+        // bytes that get packaged
+        $fileService = new class ($paths) {
+            public object $fs;
+
+            public function __construct(private array $paths)
+            {
+                $this->fs = new class () {
+                    public function read(string $path): string
+                    {
+                        return "contents of {$path}";
+                    }
+                };
+            }
+
+            public function get(int $fileId): object
+            {
+                return (object) ['path' => $this->paths[$fileId]];
+            }
+        };
+        app()->instance('file', $fileService);
+
+        return $submissionFileRepository;
+    }
+
+    /**
+     * Build a media file as the media files panel stores one.
+     */
+    private function createMediaFile(
+        int $id,
+        int $fileId,
+        string $name,
+        ?int $variantGroupId = null,
+        ?MediaVariantType $variantType = null
+    ): SubmissionFile {
+        $mediaFile = new SubmissionFile();
+        $mediaFile->setId($id);
+        $mediaFile->setData('fileId', $fileId);
+        $mediaFile->setData('name', ['en' => $name]);
+        $mediaFile->setData('variantGroupId', $variantGroupId);
+        $mediaFile->setData('variantType', $variantType?->value);
+        return $mediaFile;
+    }
+
+    /**
+     * Prepare a document that refers to media files, returning the result alongside the
+     * media it recorded for packaging.
+     *
+     * @return array [result, packagedMedia]
+     */
+    private function prepareJatsWithMedia(string $jats, array $mediaFiles): array
+    {
+        $document = new JatsDocument($jats, 'jtest.pdf', $mediaFiles, 'jtest-2025-82');
+
+        return [$document->prepare('J Test'), $document->getPackagedMedia()];
+    }
+
+    /**
+     * Build the JATS fixture with a body, for the figures that only uploaded JATS carries.
+     */
+    private function jatsWithBody(string $body): string
+    {
+        return str_replace('</article>', "<body>{$body}</body></article>", $this->jats());
+    }
+
+    /**
      * Build the JATS fixture, optionally injecting elements before the abstract.
      */
     private function jats(string $extraArticleMeta = ''): string
@@ -165,33 +273,14 @@ class PubmedCentralExportPluginTest extends PKPTestCase
     }
 
     /**
-     * Call one of the two JATS modifiers, absorbing their differing signatures.
+     * Prepare a document.
      */
-    private function modifyJats(
-        string $method,
+    private function prepareJats(
         string $jats,
         string $articlePdfFilename,
         ?string $collectionYear = null
     ): string|array {
-        $args = [$jats, $articlePdfFilename];
-        if ($method === 'modifyDefaultJats') {
-            $args[] = 'J Test';
-            $args[] = $collectionYear;
-        }
-        return $this->invoke($this->createPlugin(), $method, $args);
-    }
-
-    /**
-     * modifyDefaultJats() and modifyCustomJats() carry byte-identical self-uri and
-     * empty-paragraph handling, so every test of that shared behaviour runs against
-     * both. Anything asserted here must hold for generated and uploaded JATS alike.
-     */
-    public static function jatsModifierProvider(): array
-    {
-        return [
-            'generated JATS' => ['modifyDefaultJats'],
-            'uploaded JATS' => ['modifyCustomJats'],
-        ];
+        return (new JatsDocument($jats, $articlePdfFilename))->prepare('J Test', $collectionYear);
     }
 
     //
@@ -250,7 +339,7 @@ class PubmedCentralExportPluginTest extends PKPTestCase
     public function testDepositActionOfferedWhenCredentialsAreComplete(): void
     {
         $plugin = $this->createPlugin([
-            'host' => 'ftp.example.org',
+            'host' => 'sftp.example.org',
             'username' => 'user',
             'password' => 'secret',
         ]);
@@ -281,8 +370,8 @@ class PubmedCentralExportPluginTest extends PKPTestCase
         return [
             'nothing set' => [[]],
             'host missing' => [['username' => 'user', 'password' => 'secret']],
-            'username missing' => [['host' => 'ftp.example.org', 'password' => 'secret']],
-            'password missing' => [['host' => 'ftp.example.org', 'username' => 'user']],
+            'username missing' => [['host' => 'sftp.example.org', 'password' => 'secret']],
+            'password missing' => [['host' => 'sftp.example.org', 'username' => 'user']],
             'host empty' => [['host' => '', 'username' => 'user', 'password' => 'secret']],
         ];
     }
@@ -300,13 +389,13 @@ class PubmedCentralExportPluginTest extends PKPTestCase
 
     public static function accountProvider(): array
     {
-        $complete = ['host' => 'ftp.example.org', 'username' => 'user', 'password' => 'secret'];
+        $complete = ['host' => 'sftp.example.org', 'username' => 'user', 'password' => 'secret'];
 
         return [
             'complete' => [$complete, true],
             'nothing set' => [[], false],
             'blank strings' => [['host' => '', 'username' => '', 'password' => ''], false],
-            'host only' => [['host' => 'ftp.example.org'], false],
+            'host only' => [['host' => 'sftp.example.org'], false],
             'password missing' => [array_diff_key($complete, ['password' => null]), false],
         ];
     }
@@ -340,6 +429,83 @@ class PubmedCentralExportPluginTest extends PKPTestCase
      * abbreviation and the article number.
      */
     public function testBuildFileNameUsesTheArticleNumberScheme(): void
+    {
+        $plugin = $this->createPlugin(['namingType' => 'articleNumber']);
+        $this->bindIssueRepository(12, 3, '2025-03-01');
+
+        $publication = new Publication();
+        $publication->setData('issueId', 7);
+        $publication->setData('articleNumber', 'e12345');
+
+        $this->assertSame(
+            'jtest-2025-e12345.xml',
+            $this->invoke($plugin, 'buildFileName', ['J Test', $this->createJournal(), $publication, false, 'xml'])
+        );
+    }
+
+    /**
+     * Every name is derived from the publication, so without the version two versions of an
+     * article would produce the same package name and the same names inside it. PMC reads the
+     * uid as one part of the name, so the version goes inside it: "e12345.v2", not "e12345-v2".
+     */
+    public function testBuildFileNameCarriesTheVersion(): void
+    {
+        $plugin = $this->createPlugin(['namingType' => 'articleNumber']);
+        $this->bindIssueRepository(12, 3, '2025-03-01');
+
+        $publication = new Publication();
+        $publication->setData('issueId', 7);
+        $publication->setData('articleNumber', 'e12345');
+        $publication->setData('versionMajor', 2);
+
+        $this->assertSame(
+            'jtest-2025-e12345.v2.xml',
+            $this->invoke($plugin, 'buildFileName', ['J Test', $this->createJournal(), $publication, false, 'xml'])
+        );
+    }
+
+    /**
+     * The version separates the volume/issue scheme's names for the same reason.
+     */
+    public function testBuildFileNameCarriesTheVersionUnderTheVolumeIssueScheme(): void
+    {
+        $plugin = $this->createPlugin(['namingType' => 'volumeIssue']);
+        $this->bindIssueRepository(12, 3);
+
+        $publication = new Publication();
+        $publication->setData('issueId', 7);
+        $publication->setData('pages', '45-52');
+        $publication->setData('versionMajor', 3);
+
+        $this->assertSame(
+            'jtest-12-3-45.v3.xml',
+            $this->invoke($plugin, 'buildFileName', ['J Test', $this->createJournal(), $publication, false, 'xml'])
+        );
+    }
+
+    /**
+     * The version sits before the timestamp, so a package name stays sortable by article.
+     */
+    public function testBuildFileNamePlacesTheVersionBeforeTheTimestamp(): void
+    {
+        $plugin = $this->createPlugin(['namingType' => 'articleNumber']);
+        $this->bindIssueRepository(12, 3, '2025-03-01');
+
+        $publication = new Publication();
+        $publication->setData('issueId', 7);
+        $publication->setData('articleNumber', 'e12345');
+        $publication->setData('versionMajor', 2);
+
+        $this->assertMatchesRegularExpression(
+            '/^jtest-2025-e12345\.v2-\d{14}\.zip$/',
+            $this->invoke($plugin, 'buildFileName', ['J Test', $this->createJournal(), $publication, true, 'zip'])
+        );
+    }
+
+    /**
+     * A publication carrying no version number is named the way it always was.
+     */
+    public function testBuildFileNameOmitsAnUnknownVersion(): void
     {
         $plugin = $this->createPlugin(['namingType' => 'articleNumber']);
         $this->bindIssueRepository(12, 3, '2025-03-01');
@@ -420,6 +586,7 @@ class PubmedCentralExportPluginTest extends PKPTestCase
 
     /**
      * PMC file names cannot contain spaces or special characters such as ?, %, #, / or :.
+     * A dot is not one of them - PMC's own uids carry one - so it is kept.
      */
     public function testBuildFileNameStripsNonAlphanumericCharactersAndLowercases(): void
     {
@@ -428,7 +595,7 @@ class PubmedCentralExportPluginTest extends PKPTestCase
         $publication->setData('articleNumber', 'e 12/345');
 
         $this->assertSame(
-            'jpubknowledge1-e12345',
+            'j.pubknowledge1-e12345',
             $this->invoke(
                 $plugin,
                 'buildFileName',
@@ -680,6 +847,108 @@ class PubmedCentralExportPluginTest extends PKPTestCase
                 [['plugins.importexport.pmc.export.failure.jatsNodeMissing', 'article-meta']]
             )
         );
+    }
+
+    /**
+     * Package an uploaded document referring to the given media files, skipping validation.
+     *
+     * @param SubmissionFile[] $mediaFiles
+     * @param array $mediaPaths [file id => path in the file store] for the media files; ids
+     *  12 and 13 are the PDF galley and the JATS
+     *
+     * @return array [plugin, package]
+     */
+    private function packageWithMedia(array $mediaFiles, array $mediaPaths, string $body): array
+    {
+        $plugin = $this->createPlugin(['nlmTitle' => 'J Test', 'namingType' => 'articleNumber']);
+
+        $submissionFileRepository = $this->bindMediaFiles(
+            $mediaFiles,
+            [12 => 'journals/1/galley.pdf', 13 => 'journals/1/article.xml'] + $mediaPaths
+        );
+
+        // The PDF galley, and the uploaded JATS the document is read from
+        $galleyFile = new SubmissionFile();
+        $galleyFile->setData('mimetype', 'application/pdf');
+        $galleyFile->setData('genreId', 4);
+        $galleyFile->setData('fileId', 12);
+        $submissionFileRepository->method('get')->willReturn($galleyFile);
+
+        $jatsSubmissionFile = new SubmissionFile();
+        $jatsSubmissionFile->setData('fileId', 13);
+        $submissionFileRepository->method('getSubmissionFileContent')->willReturn($this->jatsWithBody($body));
+
+        $jatsRepository = $this->createMock(JatsRepository::class);
+        $jatsRepository->method('getJatsFile')->willReturn(new JatsFile(3, 5, $jatsSubmissionFile));
+        app()->instance(JatsRepository::class, $jatsRepository);
+
+        $genre = new Genre();
+        $genre->setData('category', Genre::GENRE_CATEGORY_DOCUMENT);
+        $genre->setData('supplementary', false);
+        $genre->setData('dependent', false);
+        $genreDao = $this->createMock(GenreDAO::class);
+        $genreDao->method('getEnabledByContextId')->willReturn(collect());
+        $genreDao->method('getById')->willReturn($genre);
+        DAORegistry::registerDAO('GenreDAO', $genreDao);
+
+        // The collection year, which the package name is built from
+        $this->bindSubmissionRepository(['2025-03-01']);
+
+        $galley = new Galley();
+        $galley->setData('locale', 'en');
+        $galley->setData('submissionFileId', 21);
+
+        $publication = new Publication();
+        $publication->setId(3);
+        $publication->setData('submissionId', 5);
+        $publication->setData('locale', 'en');
+        $publication->setData('articleNumber', 'e12345');
+        $publication->setData('galleys', [$galley]);
+
+        // Validation is exercised by the validateJats() tests; running the style checker
+        // here would only make the packaging slow to test
+        return [$plugin, $plugin->createZip($publication, $this->createJournal(), true)];
+    }
+
+    //
+    // createZip()
+    //
+
+    /**
+     * PMC supports a single level of decompression: every file sits at the top of the
+     * package, named alike, and nothing is nested in a directory.
+     *
+     * @see https://pmc.ncbi.nlm.nih.gov/pub/filespec-delivery/
+     */
+    public function testCreateZipPackagesTheXmlPdfAndMediaSideBySide(): void
+    {
+        [, $package] = $this->packageWithMedia(
+            [$this->createMediaFile(1, 11, 'figure1.tif')],
+            [11 => 'journals/1/figure1.tif'],
+            '<fig id="f1"><graphic xlink:href="figure1.tif"/></fig>'
+        );
+
+        $this->assertArrayNotHasKey('error', $package);
+
+        // The package itself carries a timestamp, which PMC reads as the revision
+        $this->assertMatchesRegularExpression('/^jtest-2025-e12345-\d{14}$/', $package['filename']);
+
+        $zip = new ZipArchive();
+        $zip->open($package['path']);
+        $names = [];
+        for ($i = 0; $i < $zip->numFiles; $i++) {
+            $names[] = $zip->getNameIndex($i);
+        }
+        $zip->close();
+        sort($names);
+
+        $this->assertSame([
+            'jtest-2025-e12345-g001.tif',
+            'jtest-2025-e12345.pdf',
+            'jtest-2025-e12345.xml',
+        ], $names);
+
+        unlink($package['path']);
     }
 
     //
@@ -974,12 +1243,11 @@ class PubmedCentralExportPluginTest extends PKPTestCase
     }
 
     //
-    // modifyDefaultJats() / modifyCustomJats() - shared handling
+    // JatsDocument - handling shared by both kinds of document
     //
-    #[DataProvider('jatsModifierProvider')]
-    public function testSelfUriIsInsertedBeforeTheAbstract(string $method): void
+    public function testSelfUriIsInsertedBeforeTheAbstract(): void
     {
-        $result = $this->modifyJats($method, $this->jats(), 'jtest-12-3-45.pdf');
+        $result = $this->prepareJats($this->jats(), 'jtest-12-3-45.pdf');
 
         $this->assertIsString($result);
         $xpath = $this->xpath($result);
@@ -996,12 +1264,11 @@ class PubmedCentralExportPluginTest extends PKPTestCase
         );
     }
 
-    #[DataProvider('jatsModifierProvider')]
-    public function testSelfUriIsInsertedBeforeAnExistingSelfUri(string $method): void
+    public function testSelfUriIsInsertedBeforeAnExistingSelfUri(): void
     {
         $jats = $this->jats('<self-uri content-type="html" xlink:href="article.html"/>');
 
-        $result = $this->modifyJats($method, $jats, 'jtest-12-3-45.pdf');
+        $result = $this->prepareJats($jats, 'jtest-12-3-45.pdf');
 
         $xpath = $this->xpath($result);
         $selfUris = $xpath->query('//article-meta/self-uri');
@@ -1011,15 +1278,14 @@ class PubmedCentralExportPluginTest extends PKPTestCase
         $this->assertSame('html', $selfUris->item(1)->getAttribute('content-type'));
     }
 
-    #[DataProvider('jatsModifierProvider')]
-    public function testExistingPdfSelfUrisAreReplaced(string $method): void
+    public function testExistingPdfSelfUrisAreReplaced(): void
     {
         $jats = $this->jats(
             '<self-uri content-type="pdf" xlink:href="old.pdf"/>' .
             '<self-uri content-type="application/pdf" xlink:href="older.pdf"/>'
         );
 
-        $result = $this->modifyJats($method, $jats, 'new.pdf');
+        $result = $this->prepareJats($jats, 'new.pdf');
 
         $xpath = $this->xpath($result);
         $selfUris = $xpath->query('//article-meta/self-uri');
@@ -1043,12 +1309,11 @@ class PubmedCentralExportPluginTest extends PKPTestCase
         );
     }
 
-    #[DataProvider('jatsModifierProvider')]
-    public function testEmptyParagraphsAreRemoved(string $method): void
+    public function testEmptyParagraphsAreRemoved(): void
     {
         $jats = $this->jats('<self-uri content-type="html" xlink:href="a.html"/><p>   </p>');
 
-        $result = $this->modifyJats($method, $jats, 'jtest.pdf');
+        $result = $this->prepareJats($jats, 'jtest.pdf');
 
         $xpath = $this->xpath($result);
         // Only the abstract's non-empty paragraph should survive.
@@ -1056,8 +1321,74 @@ class PubmedCentralExportPluginTest extends PKPTestCase
         $this->assertSame('An abstract.', $xpath->query('//p')->item(0)->textContent);
     }
 
-    #[DataProvider('jatsModifierProvider')]
-    public function testMissingArticleMetaReturnsAnError(string $method): void
+    /**
+     * A rich-text editor writes a blank line as a paragraph holding a non-breaking space.
+     * XPath's normalize-space() leaves that standing, but PMC counts it as empty and rejects
+     * the paragraph, so emptiness has to be measured the way PMC measures it.
+     */
+    public function testParagraphsHoldingOnlyNonBreakingSpaceAreRemoved(): void
+    {
+        $jats = $this->jats("<p>\u{00A0}</p><p>\u{2003}\u{200B}</p><p>Real content.</p>");
+
+        $result = $this->prepareJats($jats, 'jtest.pdf');
+
+        $xpath = $this->xpath($result);
+        $paragraphs = [];
+        foreach ($xpath->query('//p') as $paragraph) {
+            $paragraphs[] = $paragraph->textContent;
+        }
+
+        $this->assertSame(['Real content.', 'An abstract.'], $paragraphs);
+    }
+
+    /**
+     * A paragraph is content to PMC as soon as it holds a child element, whatever its text.
+     */
+    public function testParagraphsHoldingAnElementAreKept(): void
+    {
+        $jats = $this->jats("<p>\u{00A0}<italic>x</italic></p>");
+
+        $result = $this->prepareJats($jats, 'jtest.pdf');
+
+        $this->assertSame(1, $this->xpath($result)->query('//p/italic')->length);
+    }
+
+    /**
+     * The PMC style checker restricts journal-id-type to a fixed set of values, so an
+     * identifier carrying any other type - or none - stops the deposit. OJS records its own,
+     * and an uploaded document may carry identifiers from wherever it was produced.
+     */
+    public function testUnsupportedJournalIdsAreRemoved(): void
+    {
+        $jats = str_replace(
+            '<journal-id journal-id-type="ojs">testjournal</journal-id>',
+            '<journal-id journal-id-type="ojs">testjournal</journal-id>'
+            . '<journal-id journal-id-type="publisher">Journal of Testing</journal-id>'
+            . '<journal-id>untyped</journal-id>'
+            . '<journal-id journal-id-type="publisher-id">jtest</journal-id>',
+            $this->jats()
+        );
+
+        $result = $this->prepareJats($jats, 'jtest.pdf');
+
+        $this->assertIsString($result);
+        $xpath = $this->xpath($result);
+
+        $this->assertSame(
+            0,
+            $xpath->query(
+                '//journal-meta/journal-id[not(@journal-id-type)'
+                . " or @journal-id-type='ojs' or @journal-id-type='publisher']"
+            )->length,
+            'Journal identifiers PMC does not accept should have been removed'
+        );
+
+        $supported = $xpath->query("//journal-meta/journal-id[@journal-id-type='publisher-id']");
+        $this->assertSame(1, $supported->length, 'A supported journal-id should have been kept');
+        $this->assertSame('jtest', $supported->item(0)->textContent);
+    }
+
+    public function testMissingArticleMetaReturnsAnError(): void
     {
         $jats = '<?xml version="1.0"?><article><front><journal-meta>'
             . '<journal-id journal-id-type="ojs">testjournal</journal-id>'
@@ -1066,12 +1397,11 @@ class PubmedCentralExportPluginTest extends PKPTestCase
 
         $this->assertSame(
             ['plugins.importexport.pmc.export.failure.jatsNodeMissing', 'article-meta'],
-            $this->modifyJats($method, $jats, 'jtest.pdf')
+            $this->prepareJats($jats, 'jtest.pdf')
         );
     }
 
-    #[DataProvider('jatsModifierProvider')]
-    public function testMissingAbstractReturnsAnError(string $method): void
+    public function testMissingAbstractReturnsAnError(): void
     {
         $jats = '<?xml version="1.0"?><article><front><journal-meta>'
             . '<journal-id journal-id-type="ojs">testjournal</journal-id>'
@@ -1082,18 +1412,17 @@ class PubmedCentralExportPluginTest extends PKPTestCase
 
         $this->assertSame(
             ['plugins.importexport.pmc.export.failure.jatsNodeMissing', 'abstract'],
-            $this->modifyJats($method, $jats, 'jtest.pdf')
+            $this->prepareJats($jats, 'jtest.pdf')
         );
     }
 
-    #[DataProvider('jatsModifierProvider')]
-    public function testMalformedXmlReturnsAnError(string $method): void
+    public function testMalformedXmlReturnsAnError(): void
     {
         // The methods rely on the caller having enabled internal error handling;
         // exportXML() does this before calling them.
         $previous = libxml_use_internal_errors(true);
         try {
-            $result = $this->modifyJats($method, '<article><front>', 'jtest.pdf');
+            $result = $this->prepareJats('<article><front>', 'jtest.pdf');
         } finally {
             libxml_clear_errors();
             libxml_use_internal_errors($previous);
@@ -1102,30 +1431,305 @@ class PubmedCentralExportPluginTest extends PKPTestCase
         $this->assertSame(['plugins.importexport.pmc.export.failure.loadJats'], $result);
     }
 
+    public function testAnEmptyDocumentReturnsAnError(): void
+    {
+        $this->assertSame(
+            ['plugins.importexport.pmc.export.failure.loadJats'],
+            $this->prepareJats('', 'jtest.pdf')
+        );
+    }
+
     //
-    // modifyCustomJats() - uploaded JATS
+    // JatsDocument::prepareUploaded()
     //
 
     /**
      * Uploaded JATS is re-modified whenever a submission is re-exported, and the
-     * result has to converge. modifyDefaultJats() has no equivalent test because it
+     * result has to converge. prepareGenerated() has no equivalent test because it
      * always re-adds the pmc journal-id and abbrev-journal-title; it is only ever
      * handed freshly generated JATS.
      */
     public function testModifyCustomJatsIsIdempotent(): void
     {
-        $once = $this->modifyJats('modifyCustomJats', $this->jats(), 'jtest.pdf');
-        $twice = $this->modifyJats('modifyCustomJats', $once, 'jtest.pdf');
+        $once = $this->prepareJats($this->jats(), 'jtest.pdf');
+        $twice = $this->prepareJats($once, 'jtest.pdf');
 
         $this->assertSame($once, $twice);
     }
 
+    /**
+     * PMC names a figure graphic -g###, an inline graphic -i### and anything else -s###,
+     * all built from the package's own name, and every file in a package has to be
+     * referenced from the XML -- so the document decides what is packaged.
+     */
+    public function testCustomJatsPointsMediaReferencesAtPackagedFiles(): void
+    {
+        $body = <<<'XML'
+            <p>Text with an <inline-graphic xlink:href="logo.png"/> in it.</p>
+            <fig id="f1"><graphic xlink:href="figure1.jpg"/></fig>
+            <fig id="f2"><graphic xlink:href="figure2.jpg"/></fig>
+            <supplementary-material xlink:href="dataset.csv"/>
+            XML;
+
+        [$result, $packaged] = $this->prepareJatsWithMedia($this->jatsWithBody($body), [
+            'logo.png' => 'journals/1/logo-hi.tif',
+            'figure1.jpg' => 'journals/1/figure1-hi.tif',
+            'figure2.jpg' => 'journals/1/figure2-hi.tif',
+            'dataset.csv' => 'journals/1/dataset.csv',
+        ]);
+
+        $this->assertIsString($result);
+        $xpath = $this->xpath($result);
+
+        $this->assertSame(
+            'jtest-2025-82-i001.tif',
+            $xpath->evaluate('string(//inline-graphic/@xlink:href)')
+        );
+        $this->assertSame(
+            'jtest-2025-82-g001.tif',
+            $xpath->evaluate('string(//fig[@id="f1"]/graphic/@xlink:href)')
+        );
+        $this->assertSame(
+            'jtest-2025-82-g002.tif',
+            $xpath->evaluate('string(//fig[@id="f2"]/graphic/@xlink:href)')
+        );
+        $this->assertSame(
+            'jtest-2025-82-s001.csv',
+            $xpath->evaluate('string(//supplementary-material/@xlink:href)')
+        );
+
+        $this->assertSame([
+            'jtest-2025-82-i001.tif' => 'journals/1/logo-hi.tif',
+            'jtest-2025-82-g001.tif' => 'journals/1/figure1-hi.tif',
+            'jtest-2025-82-g002.tif' => 'journals/1/figure2-hi.tif',
+            'jtest-2025-82-s001.csv' => 'journals/1/dataset.csv',
+        ], $packaged);
+    }
+
+    /**
+     * A file name in the document is matched however the depositor wrote it, and a file
+     * referred to twice is packaged once under one name.
+     */
+    public function testCustomJatsPackagesAFileReferencedTwiceOnce(): void
+    {
+        $body = <<<'XML'
+            <fig id="f1"><graphic xlink:href="Figure1.JPG"/></fig>
+            <fig id="f2"><graphic xlink:href="images/figure1.jpg"/></fig>
+            XML;
+
+        [$result, $packaged] = $this->prepareJatsWithMedia($this->jatsWithBody($body), [
+            'figure1.jpg' => 'journals/1/figure1.jpg',
+        ]);
+
+        $xpath = $this->xpath($result);
+        $this->assertSame(
+            ['jtest-2025-82-g001.jpg', 'jtest-2025-82-g001.jpg'],
+            array_map(
+                fn ($node) => $node->getAttribute('xlink:href'),
+                iterator_to_array($xpath->query('//graphic'))
+            )
+        );
+        $this->assertSame(['jtest-2025-82-g001.jpg' => 'journals/1/figure1.jpg'], $packaged);
+    }
+
+    /**
+     * PMC rejects a package whose XML points at a file that is not in it, so an export
+     * that cannot resolve a reference is stopped with the file named.
+     */
+    public function testCustomJatsReportsAReferenceWithNoMediaFile(): void
+    {
+        $body = '<fig id="f1"><graphic xlink:href="figure1.jpg"/></fig>';
+
+        [$result, $packaged] = $this->prepareJatsWithMedia($this->jatsWithBody($body), []);
+
+        $this->assertSame('plugins.importexport.pmc.export.failure.missingMediaFile', $result[0]);
+        $this->assertSame(
+            __('plugins.importexport.pmc.export.failure.missingMediaFile.none', ['reference' => 'figure1.jpg']),
+            $result[1]
+        );
+        $this->assertSame([], $packaged);
+    }
+
+    /**
+     * The mismatch is usually a media file whose name has drifted from the one the
+     * document was written against, so the names that are available are reported too.
+     */
+    public function testCustomJatsNamesTheAvailableMediaFilesWhenAReferenceIsUnmatched(): void
+    {
+        $body = '<fig id="f1"><graphic xlink:href="figure1.jpg"/></fig>';
+
+        [$result] = $this->prepareJatsWithMedia($this->jatsWithBody($body), [
+            'xyz_figure1.tif' => 'journals/1/aaa.tif',
+            'dataset.csv' => 'journals/1/bbb.csv',
+        ]);
+
+        $this->assertSame('plugins.importexport.pmc.export.failure.missingMediaFile', $result[0]);
+        $this->assertSame(
+            __('plugins.importexport.pmc.export.failure.missingMediaFile.available', [
+                'reference' => 'figure1.jpg',
+                'files' => 'xyz_figure1.tif, dataset.csv',
+            ]),
+            $result[1]
+        );
+    }
+
+    /**
+     * A document is often written against a file whose extension has since changed, or
+     * which was uploaded in another format, so the name without its extension is matched
+     * too. The packaged file keeps the extension of the file that was actually uploaded.
+     */
+    public function testCustomJatsMatchesAReferenceOnTheNameWithoutItsExtension(): void
+    {
+        $body = '<fig id="f1"><graphic xlink:href="figure1.tif"/></fig>';
+
+        [$result, $packaged] = $this->prepareJatsWithMedia($this->jatsWithBody($body), [
+            'figure1.jpg' => 'journals/1/figure1.jpg',
+        ]);
+
+        $this->assertIsString($result);
+        $this->assertSame(
+            'jtest-2025-82-g001.jpg',
+            $this->xpath($result)->evaluate('string(//graphic/@xlink:href)')
+        );
+        $this->assertSame(['jtest-2025-82-g001.jpg' => 'journals/1/figure1.jpg'], $packaged);
+    }
+
+    /**
+     * Packaging the wrong image is worse than stopping the export, so a name that could
+     * be answered with either of two files is no match at all.
+     */
+    public function testCustomJatsWillNotGuessBetweenMediaFilesSharingAName(): void
+    {
+        $body = '<fig id="f1"><graphic xlink:href="figure1.png"/></fig>';
+
+        [$result, $packaged] = $this->prepareJatsWithMedia($this->jatsWithBody($body), [
+            'figure1.jpg' => 'journals/1/figure1.jpg',
+            'figure1.tif' => 'journals/1/figure1.tif',
+        ]);
+
+        $this->assertSame('plugins.importexport.pmc.export.failure.missingMediaFile', $result[0]);
+        $this->assertSame([], $packaged);
+    }
+
+    /**
+     * A reference to somewhere else on the web is the depositor's to keep: there is no
+     * file of ours behind it to package.
+     */
+    public function testCustomJatsLeavesExternalReferencesAlone(): void
+    {
+        $body = '<fig id="f1"><graphic xlink:href="https://example.org/figure1.jpg"/></fig>';
+
+        [$result, $packaged] = $this->prepareJatsWithMedia($this->jatsWithBody($body), []);
+
+        $this->assertIsString($result);
+        $this->assertSame(
+            'https://example.org/figure1.jpg',
+            $this->xpath($result)->evaluate('string(//graphic/@xlink:href)')
+        );
+        $this->assertSame([], $packaged);
+    }
+
+    /**
+     * Every file in a PMC package has to be referenced from the XML, so a media file the
+     * document never mentions is not packaged.
+     */
+    public function testCustomJatsPackagesOnlyReferencedMediaFiles(): void
+    {
+        [$result, $packaged] = $this->prepareJatsWithMedia($this->jats(), [
+            'figure1.jpg' => 'journals/1/figure1.jpg',
+        ]);
+
+        $this->assertIsString($result);
+        $this->assertSame([], $packaged);
+    }
+
     //
-    // modifyDefaultJats() - generated JATS, PMC-specific transforms
+    // getMediaFiles()
+    //
+
+    /**
+     * PMC asks for the highest resolution available, so a document referring to the web
+     * version of an image is answered with the high-resolution file linked to it. Both
+     * names resolve to it, because a document may refer to either.
+     */
+    public function testMediaFilesResolveToTheHighResolutionVariant(): void
+    {
+        $this->bindMediaFiles(
+            [
+                $this->createMediaFile(1, 11, 'figure1.jpg', 7, MediaVariantType::WEB),
+                $this->createMediaFile(2, 12, 'figure1.tif', 7, MediaVariantType::HIGH_RESOLUTION),
+            ],
+            [11 => 'journals/1/aaa.jpg', 12 => 'journals/1/bbb.tif']
+        );
+
+        $publication = new Publication();
+        $publication->setId(3);
+        $publication->setData('submissionId', 5);
+
+        $mediaFiles = $this->invoke($this->createPlugin(), 'getMediaFiles', [$publication]);
+
+        $this->assertSame([
+            'figure1.jpg' => 'journals/1/bbb.tif',
+            'figure1.tif' => 'journals/1/bbb.tif',
+        ], $mediaFiles);
+    }
+
+    /**
+     * A high-resolution file that was never linked to a counterpart stands for itself.
+     * Grouping the unlinked files together would key them all alike, and every one of
+     * them would resolve to whichever high-resolution file was uploaded.
+     */
+    public function testUnlinkedMediaFilesDoNotResolveToAnUnlinkedHighResolutionFile(): void
+    {
+        $this->bindMediaFiles(
+            [
+                $this->createMediaFile(1, 11, 'figure1.tif', null, MediaVariantType::HIGH_RESOLUTION),
+                $this->createMediaFile(2, 12, 'logo.png'),
+            ],
+            [11 => 'journals/1/aaa.tif', 12 => 'journals/1/bbb.png']
+        );
+
+        $publication = new Publication();
+        $publication->setId(3);
+        $publication->setData('submissionId', 5);
+
+        $mediaFiles = $this->invoke($this->createPlugin(), 'getMediaFiles', [$publication]);
+
+        $this->assertSame([
+            'figure1.tif' => 'journals/1/aaa.tif',
+            'logo.png' => 'journals/1/bbb.png',
+        ], $mediaFiles);
+    }
+
+    /**
+     * A media file with no high-resolution counterpart is packaged as it is.
+     */
+    public function testMediaFilesWithoutAVariantArePackagedAsUploaded(): void
+    {
+        $this->bindMediaFiles(
+            [$this->createMediaFile(1, 11, 'Figure1.PNG')],
+            [11 => 'journals/1/aaa.png']
+        );
+
+        $publication = new Publication();
+        $publication->setId(3);
+        $publication->setData('submissionId', 5);
+
+        $mediaFiles = $this->invoke($this->createPlugin(), 'getMediaFiles', [$publication]);
+
+        // Indexed in lower case: the document may name the file however it likes
+        $this->assertSame(
+            ['figure1.png' => 'journals/1/aaa.png'],
+            $mediaFiles
+        );
+    }
+
+    //
+    // JatsDocument::prepareGenerated() - PMC-specific transforms
     //
     public function testDefaultJatsAddsThePmcJournalIdAsTheFirstChild(): void
     {
-        $result = $this->modifyJats('modifyDefaultJats', $this->jats(), 'jtest.pdf');
+        $result = $this->prepareJats($this->jats(), 'jtest.pdf');
 
         $this->assertIsString($result);
         $xpath = $this->xpath($result);
@@ -1141,7 +1745,7 @@ class PubmedCentralExportPluginTest extends PKPTestCase
 
     public function testDefaultJatsAddsTheNlmAbbrevJournalTitle(): void
     {
-        $result = $this->modifyJats('modifyDefaultJats', $this->jats(), 'jtest.pdf');
+        $result = $this->prepareJats($this->jats(), 'jtest.pdf');
 
         $xpath = $this->xpath($result);
         $abbrev = $xpath->query('//journal-title-group/abbrev-journal-title');
@@ -1159,7 +1763,7 @@ class PubmedCentralExportPluginTest extends PKPTestCase
      */
     public function testDefaultJatsAddsTheCollectionDate(): void
     {
-        $result = $this->modifyJats('modifyDefaultJats', $this->jats(), 'jtest.pdf', '2025');
+        $result = $this->prepareJats($this->jats(), 'jtest.pdf', '2025');
 
         $this->assertIsString($result);
         $xpath = $this->xpath($result);
@@ -1177,7 +1781,7 @@ class PubmedCentralExportPluginTest extends PKPTestCase
 
     public function testDefaultJatsAddsNoCollectionDateWithoutACollectionYear(): void
     {
-        $result = $this->modifyJats('modifyDefaultJats', $this->jats(), 'jtest.pdf');
+        $result = $this->prepareJats($this->jats(), 'jtest.pdf');
 
         $this->assertIsString($result);
         $this->assertSame(
@@ -1194,7 +1798,7 @@ class PubmedCentralExportPluginTest extends PKPTestCase
     {
         $jats = preg_replace('|<pub-date.*?</pub-date>|', '', $this->jats());
 
-        $result = $this->modifyJats('modifyDefaultJats', $jats, 'jtest.pdf', '2025');
+        $result = $this->prepareJats($jats, 'jtest.pdf', '2025');
 
         $this->assertIsString($result);
         $this->assertSame(0, $this->xpath($result)->query('//pub-date')->length);
@@ -1202,13 +1806,51 @@ class PubmedCentralExportPluginTest extends PKPTestCase
 
     public function testDefaultJatsSetsTheArticleType(): void
     {
-        $result = $this->modifyJats('modifyDefaultJats', $this->jats(), 'jtest.pdf');
+        $result = $this->prepareJats($this->jats(), 'jtest.pdf');
 
         $xpath = $this->xpath($result);
         $this->assertSame(
             'research-article',
             $xpath->query('/article')->item(0)->getAttribute('article-type')
         );
+    }
+
+    /**
+     * The article-type follows the section the article was published in, using the
+     * Open Research Europe section names; anything else is a research article.
+     */
+    #[DataProvider('sectionArticleTypeProvider')]
+    public function testDefaultJatsMapsTheSectionToThePmcArticleType(string $section, string $articleType): void
+    {
+        $categories = sprintf(
+            '<article-categories><subj-group subj-group-type="heading"><subject>%s</subject></subj-group></article-categories>',
+            $section
+        );
+
+        $result = $this->prepareJats($this->jats($categories), 'jtest.pdf');
+
+        $this->assertSame(
+            $articleType,
+            $this->xpath($result)->query('/article')->item(0)->getAttribute('article-type')
+        );
+    }
+
+    public static function sectionArticleTypeProvider(): array
+    {
+        return [
+            'open letter' => ['Open Letter', 'letter'],
+            'review' => ['Review', 'review-article'],
+            'study protocol' => ['Study Protocol', 'other'],
+            'systematic review' => ['Systematic Review', 'systematic-review'],
+            'data note' => ['Data Note', 'data-paper'],
+            'method article' => ['Method Article', 'methods-article'],
+            'brief report' => ['Brief Report', 'brief-report'],
+            'retraction' => ['Retraction', 'retraction'],
+            'case differs' => ['OPEN LETTER', 'letter'],
+            'surrounding space' => [' Review ', 'review-article'],
+            'generic articles section' => ['Articles', 'research-article'],
+            'unknown section' => ['Poetry Corner', 'research-article'],
+        ];
     }
 
     public function testDefaultJatsKeepsOnlyAuthorAndEditorContributors(): void
@@ -1222,7 +1864,7 @@ class PubmedCentralExportPluginTest extends PKPTestCase
             </contrib-group>
             XML;
 
-        $result = $this->modifyJats('modifyDefaultJats', $this->jats($contribGroup), 'jtest.pdf');
+        $result = $this->prepareJats($this->jats($contribGroup), 'jtest.pdf');
 
         $this->assertIsString($result);
         $xpath = $this->xpath($result);
@@ -1241,7 +1883,7 @@ class PubmedCentralExportPluginTest extends PKPTestCase
             . ' xlink:title="Data set" mimetype="text/csv"/>'
         );
 
-        $result = $this->modifyJats('modifyDefaultJats', $jats, 'jtest.pdf');
+        $result = $this->prepareJats($jats, 'jtest.pdf');
 
         $this->assertIsString($result);
         $xpath = $this->xpath($result);
@@ -1257,7 +1899,7 @@ class PubmedCentralExportPluginTest extends PKPTestCase
     {
         $jats = $this->jats(sprintf('<related-article related-article-type="%s" id="ra1"/>', $jatsType));
 
-        $result = $this->modifyJats('modifyDefaultJats', $jats, 'jtest.pdf');
+        $result = $this->prepareJats($jats, 'jtest.pdf');
 
         $xpath = $this->xpath($result);
         $this->assertSame(
@@ -1278,13 +1920,255 @@ class PubmedCentralExportPluginTest extends PKPTestCase
     {
         $jats = $this->jats('<related-article related-article-type="updated-article" id="ra1"/>');
 
-        $result = $this->modifyJats('modifyDefaultJats', $jats, 'jtest.pdf');
+        $result = $this->prepareJats($jats, 'jtest.pdf');
 
         $xpath = $this->xpath($result);
         $this->assertSame(
             'updated-article',
             $xpath->query('//article-meta/related-article')->item(0)->getAttribute('related-article-type')
         );
+    }
+
+    /**
+     * PMC reads the relationships between peer review materials from related-article:
+     * a report names the article it reviews, and an author's response the report it answers.
+     */
+    public function testPeerReviewRelatedObjectsBecomeRelatedArticles(): void
+    {
+        $subArticles = <<<'XML'
+            <sub-article id="rr1" article-type="reviewer-report">
+                <front-stub>
+                    <related-object id="ro1" document-id="10.1234/test.1" document-id-type="doi"
+                        document-type="peer-reviewed-article"/>
+                </front-stub>
+            </sub-article>
+            <sub-article id="ar1" article-type="author-comment">
+                <front-stub>
+                    <related-object id="ro2" document-id="10.1234/test.r1" document-id-type="doi"
+                        document-type="reviewer-report"/>
+                </front-stub>
+            </sub-article>
+            XML;
+
+        $result = $this->prepareJats(
+            str_replace('</article>', $subArticles . '</article>', $this->jats()),
+            'jtest.pdf'
+        );
+
+        $this->assertIsString($result);
+        $xpath = $this->xpath($result);
+
+        $this->assertSame(0, $xpath->query('//related-object')->length);
+
+        $reviewedArticle = $xpath->query('//sub-article[@id="rr1"]/front-stub/related-article')->item(0);
+        $this->assertSame('ro1', $reviewedArticle->getAttribute('id'));
+        $this->assertSame('reviewed-article', $reviewedArticle->getAttribute('related-article-type'));
+        $this->assertSame('doi', $reviewedArticle->getAttribute('ext-link-type'));
+        $this->assertSame('10.1234/test.1', $reviewedArticle->getAttribute('xlink:href'));
+
+        $reviewerReport = $xpath->query('//sub-article[@id="ar1"]/front-stub/related-article')->item(0);
+        $this->assertSame('reviewer-report', $reviewerReport->getAttribute('related-article-type'));
+        $this->assertSame('10.1234/test.r1', $reviewerReport->getAttribute('xlink:href'));
+    }
+
+    public function testRelatedObjectsNamingOtherThingsAreLeftAlone(): void
+    {
+        $subArticle = <<<'XML'
+            <sub-article id="rr1" article-type="reviewer-report">
+                <front-stub>
+                    <related-object id="ro1" document-id="10.1234/book" document-id-type="doi"
+                        document-type="chapter"/>
+                </front-stub>
+            </sub-article>
+            XML;
+
+        $result = $this->prepareJats(
+            str_replace('</article>', $subArticle . '</article>', $this->jats()),
+            'jtest.pdf'
+        );
+
+        $relatedObject = $this->xpath($result)->query('//related-object')->item(0);
+        $this->assertSame('chapter', $relatedObject->getAttribute('document-type'));
+        $this->assertSame(0, $this->xpath($result)->query('//related-article')->length);
+    }
+
+    /**
+     * PMC asks for the journal's editorial team to be left out of the article.
+     */
+    public function testTheJournalEditorialTeamIsRemoved(): void
+    {
+        $jats = str_replace(
+            '</journal-title-group>',
+            '</journal-title-group><contrib-group><contrib contrib-type="editor">'
+                . '<name><surname>Itor</surname><given-names>Ed</given-names></name></contrib></contrib-group>',
+            $this->jats()
+        );
+
+        $result = $this->prepareJats($jats, 'jtest.pdf');
+
+        $this->assertIsString($result);
+        $this->assertSame(0, $this->xpath($result)->query('//journal-meta/contrib-group')->length);
+    }
+
+    /**
+     * An affiliation or competing interests statement only a removed contributor referred
+     * to would be published for no one listed, so it goes with them; one an author still
+     * refers to stays.
+     */
+    public function testWhatOnlyARemovedContributorReferredToIsRemoved(): void
+    {
+        $contributors = <<<'XML'
+            <contrib-group>
+                <contrib contrib-type="author"><name><surname>A</surname></name>
+                    <xref ref-type="aff" rid="aff-1"/><xref ref-type="author-notes" rid="con-1"/></contrib>
+                <contrib contrib-type="translator"><name><surname>T</surname></name>
+                    <xref ref-type="aff" rid="aff-1"/><xref ref-type="aff" rid="aff-2"/>
+                    <xref ref-type="author-notes" rid="con-1"/><xref ref-type="author-notes" rid="con-2"/></contrib>
+            </contrib-group>
+            <aff id="aff-1"><institution>Shared</institution></aff>
+            <aff id="aff-2"><institution>Translator only</institution></aff>
+            <author-notes>
+                <fn fn-type="coi-statement" id="con-1"><p>None.</p></fn>
+                <fn fn-type="coi-statement" id="con-2"><p>The translator's own.</p></fn>
+            </author-notes>
+            XML;
+
+        $result = $this->prepareJats($this->jats($contributors), 'jtest.pdf');
+
+        $this->assertIsString($result);
+        $xpath = $this->xpath($result);
+        $this->assertSame(['aff-1'], array_map(fn ($n) => $n->getAttribute('id'), iterator_to_array($xpath->query('//article-meta/aff'))));
+        $this->assertSame(['con-1'], array_map(fn ($n) => $n->getAttribute('id'), iterator_to_array($xpath->query('//author-notes/fn'))));
+    }
+
+    /**
+     * A document may carry an affiliation or statement it never linked to a contributor,
+     * such as one affiliation for every author; that is not the removal's to take away.
+     */
+    public function testWhatNoContributorReferredToIsKept(): void
+    {
+        $contributors = <<<'XML'
+            <contrib-group>
+                <contrib contrib-type="author"><name><surname>A</surname></name></contrib>
+                <contrib contrib-type="translator"><name><surname>T</surname></name></contrib>
+            </contrib-group>
+            <aff id="aff-1"><institution>Everyone's</institution></aff>
+            <author-notes><fn fn-type="coi-statement" id="con-1"><p>None.</p></fn></author-notes>
+            XML;
+
+        $result = $this->prepareJats($this->jats($contributors), 'jtest.pdf');
+
+        $xpath = $this->xpath($result);
+        $this->assertSame(1, $xpath->query('//article-meta/aff')->length);
+        $this->assertSame(1, $xpath->query('//author-notes/fn')->length);
+    }
+
+    public function testAuthorNotesEmptiedByTheRemovalAreRemoved(): void
+    {
+        $contributors = <<<'XML'
+            <contrib-group>
+                <contrib contrib-type="author"><name><surname>A</surname></name></contrib>
+                <contrib contrib-type="translator"><name><surname>T</surname></name>
+                    <xref ref-type="author-notes" rid="con-1"/></contrib>
+            </contrib-group>
+            <author-notes><fn fn-type="coi-statement" id="con-1"><p>The translator's own.</p></fn></author-notes>
+            XML;
+
+        $result = $this->prepareJats($this->jats($contributors), 'jtest.pdf');
+
+        $this->assertSame(0, $this->xpath($result)->query('//article-meta/author-notes')->length);
+    }
+
+    /**
+     * OJS records competing interests for each author, so eleven authors declaring none
+     * give eleven copies of one statement; the article publishes it once.
+     */
+    public function testACompetingInterestsStatementSharedByAuthorsIsKeptOnce(): void
+    {
+        $contribGroup = <<<'XML'
+            <contrib-group>
+                <contrib contrib-type="author"><name><surname>A</surname></name><xref ref-type="author-notes" rid="con-1"/></contrib>
+                <contrib contrib-type="author"><name><surname>B</surname></name><xref ref-type="author-notes" rid="con-2"/></contrib>
+                <contrib contrib-type="author"><name><surname>C</surname></name><xref ref-type="author-notes" rid="con-3"/></contrib>
+            </contrib-group>
+            <author-notes>
+                <fn fn-type="coi-statement" id="con-1"><p>No competing interests were disclosed.</p></fn>
+                <fn fn-type="coi-statement" id="con-2"><p>No competing interests  were disclosed.</p></fn>
+                <fn fn-type="coi-statement" id="con-3"><p>C is a director of a company.</p></fn>
+            </author-notes>
+            XML;
+
+        $result = $this->prepareJats($this->jats($contribGroup), 'jtest.pdf');
+
+        $this->assertIsString($result);
+        $xpath = $this->xpath($result);
+        $this->assertSame(
+            ['con-1', 'con-3'],
+            array_map(fn ($fn) => $fn->getAttribute('id'), iterator_to_array($xpath->query("//author-notes/fn")))
+        );
+        $this->assertSame(
+            ['con-1', 'con-1', 'con-3'],
+            array_map(fn ($xref) => $xref->getAttribute('rid'), iterator_to_array($xpath->query('//contrib/xref')))
+        );
+    }
+
+    /**
+     * A sub-article's statements are its own, and are not merged with the article's.
+     */
+    public function testCompetingInterestsInASubArticleAreKeptSeparately(): void
+    {
+        $authorNotes = '<author-notes><fn fn-type="coi-statement" id="con-1"><p>None.</p></fn></author-notes>';
+        $subArticle = '<sub-article id="rr1" article-type="reviewer-report"><front-stub>'
+            . '<author-notes><fn fn-type="COI-statement" id="rr1-con"><p>None.</p></fn></author-notes>'
+            . '</front-stub></sub-article>';
+
+        $result = $this->prepareJats(
+            str_replace('</article>', $subArticle . '</article>', $this->jats($authorNotes)),
+            'jtest.pdf'
+        );
+
+        $this->assertIsString($result);
+        $this->assertSame(2, $this->xpath($result)->query('//author-notes/fn')->length);
+    }
+
+    /**
+     * PMC requires a volume of every article, and takes the collection year in its place
+     * where the journal publishes no volume numbers.
+     */
+    public function testTheCollectionYearStandsInForAMissingVolume(): void
+    {
+        $result = $this->prepareJats($this->jats('<elocation-id>e123</elocation-id>'), 'jtest.pdf', '2025');
+
+        $this->assertIsString($result);
+        $xpath = $this->xpath($result);
+        $this->assertSame('2025', $xpath->evaluate('string(//article-meta/volume)'));
+        $this->assertSame(
+            ['title-group', 'pub-date', 'pub-date', 'volume', 'elocation-id', 'self-uri', 'abstract'],
+            array_map(fn ($node) => $node->nodeName, iterator_to_array($xpath->query('//article-meta/*'))),
+            'The volume follows the publication dates, where the JATS content model places it'
+        );
+    }
+
+    /**
+     * PMC asks for the same year as the collection date, so a document carrying its own
+     * collection date decides it.
+     */
+    public function testTheVolumeFollowsTheDocumentsOwnCollectionDate(): void
+    {
+        $jats = $this->jats('<pub-date pub-type="collection"><year>2024</year></pub-date>');
+
+        $result = $this->prepareJats($jats, 'jtest.pdf', '2025');
+
+        $this->assertSame('2024', $this->xpath($result)->evaluate('string(//article-meta/volume)'));
+    }
+
+    public function testAVolumeTheDocumentDeclaresIsKept(): void
+    {
+        $result = $this->prepareJats($this->jats('<volume>14</volume>'), 'jtest.pdf', '2025');
+
+        $xpath = $this->xpath($result);
+        $this->assertSame(1, $xpath->query('//article-meta/volume')->length);
+        $this->assertSame('14', $xpath->evaluate('string(//article-meta/volume)'));
     }
 
     public function testDefaultJatsUnwrapsNameAlternatives(): void
@@ -1302,7 +2186,7 @@ class PubmedCentralExportPluginTest extends PKPTestCase
             </contrib-group>
             XML;
 
-        $result = $this->modifyJats('modifyDefaultJats', $this->jats($contribGroup), 'jtest.pdf');
+        $result = $this->prepareJats($this->jats($contribGroup), 'jtest.pdf');
 
         $this->assertIsString($result);
         $xpath = $this->xpath($result);
@@ -1337,8 +2221,7 @@ class PubmedCentralExportPluginTest extends PKPTestCase
             </sub-article>
             XML;
 
-        $result = $this->modifyJats(
-            'modifyDefaultJats',
+        $result = $this->prepareJats(
             str_replace('</article>', $subArticle . '</article>', $this->jats()),
             'jtest.pdf'
         );
@@ -1357,6 +2240,210 @@ class PubmedCentralExportPluginTest extends PKPTestCase
         );
     }
 
+    /**
+     * Body text may refer to the publication's media files the same way an uploaded
+     * document does, and those references are packaged and renamed alike.
+     */
+    public function testDefaultJatsPointsMediaReferencesAtPackagedFiles(): void
+    {
+        $body = <<<'XML'
+            <p>Text with an <inline-graphic xlink:href="logo.png"/> in it.</p>
+            <fig id="f1"><graphic xlink:href="figure1.jpg"/></fig>
+            XML;
+
+        [$result, $packaged] = $this->prepareJatsWithMedia(
+            $this->jatsWithBody($body),
+            [
+                'logo.png' => 'journals/1/logo-hi.tif',
+                'figure1.jpg' => 'journals/1/figure1-hi.tif',
+            ]
+        );
+
+        $this->assertIsString($result);
+        $xpath = $this->xpath($result);
+
+        $this->assertSame(
+            'jtest-2025-82-i001.tif',
+            $xpath->evaluate('string(//inline-graphic/@xlink:href)')
+        );
+        $this->assertSame(
+            'jtest-2025-82-g001.tif',
+            $xpath->evaluate('string(//fig[@id="f1"]/graphic/@xlink:href)')
+        );
+        $this->assertSame([
+            'jtest-2025-82-i001.tif' => 'journals/1/logo-hi.tif',
+            'jtest-2025-82-g001.tif' => 'journals/1/figure1-hi.tif',
+        ], $packaged);
+    }
+
+    public function testDefaultJatsReportsAReferenceWithNoMediaFile(): void
+    {
+        $body = '<fig id="f1"><graphic xlink:href="figure1.jpg"/></fig>';
+
+        [$result, $packaged] = $this->prepareJatsWithMedia(
+            $this->jatsWithBody($body),
+            []
+        );
+
+        $this->assertSame('plugins.importexport.pmc.export.failure.missingMediaFile', $result[0]);
+        $this->assertSame([], $packaged);
+    }
+
+    /**
+     * Supplementary material naming one of the publication's media files is deposited
+     * with the article, whether the document was generated or uploaded.
+     */
+    public function testSupplementaryMaterialResolvedToAMediaFileIsKept(): void
+    {
+        $body = '<p>Text.</p><supplementary-material xlink:href="dataset.csv"/>';
+
+        [$result, $packaged] = $this->prepareJatsWithMedia(
+            $this->jatsWithBody($body),
+            ['dataset.csv' => 'journals/1/dataset.csv']
+        );
+
+        $this->assertIsString($result);
+        $this->assertSame(
+            'jtest-2025-82-s001.csv',
+            $this->xpath($result)->evaluate('string(//supplementary-material/@xlink:href)')
+        );
+        $this->assertSame(['jtest-2025-82-s001.csv' => 'journals/1/dataset.csv'], $packaged);
+    }
+
+    /**
+     * Supplementary material left pointing at the web is dropped, and nothing is packaged
+     * for it: PMC rejects a reference that cannot resolve inside the package.
+     */
+    public function testSupplementaryMaterialPointingAtTheWebIsDropped(): void
+    {
+        $body = '<p>Text.</p><supplementary-material xlink:href="https://example.org/download/1/2/3"/>';
+
+        [$result, $packaged] = $this->prepareJatsWithMedia($this->jatsWithBody($body), []);
+
+        $this->assertIsString($result);
+        $this->assertSame(0, $this->xpath($result)->query('//supplementary-material')->length);
+        $this->assertSame([], $packaged);
+    }
+
+    //
+    // JatsDocument::prepare() - work a document already carries
+    //
+
+    /**
+     * A document prepared once and uploaded again is prepared again, so every step that
+     * adds something has to leave a document that already has it alone.
+     */
+    public function testThePmcJournalIdIsNotAddedTwice(): void
+    {
+        $jats = str_replace(
+            '<journal-id journal-id-type="ojs">testjournal</journal-id>',
+            '<journal-id journal-id-type="pmc">J Test</journal-id>',
+            $this->jats()
+        );
+
+        $result = $this->prepareJats($jats, 'jtest.pdf');
+
+        $this->assertIsString($result);
+        $this->assertSame(
+            1,
+            $this->xpath($result)->query("//journal-meta/journal-id[@journal-id-type='pmc']")->length
+        );
+    }
+
+    public function testTheAbbreviatedJournalTitleIsNotAddedTwice(): void
+    {
+        $jats = str_replace(
+            '<journal-title>Journal of Testing</journal-title>',
+            '<journal-title>Journal of Testing</journal-title>'
+                . '<abbrev-journal-title abbrev-type="nlm-ta">J Test</abbrev-journal-title>',
+            $this->jats()
+        );
+
+        $result = $this->prepareJats($jats, 'jtest.pdf');
+
+        $this->assertIsString($result);
+        $this->assertSame(
+            1,
+            $this->xpath($result)->query("//journal-title-group/abbrev-journal-title[@abbrev-type='nlm-ta']")->length
+        );
+    }
+
+    /**
+     * PMC reads a collection date only alongside an electronic publication date written
+     * the same way, so a document using the older @pub-type gets one to match.
+     */
+    public function testTheCollectionDateFollowsThePublicationDateSpelling(): void
+    {
+        $jats = str_replace(
+            '<pub-date publication-format="electronic" date-type="pub"><year>2026</year></pub-date>',
+            '<pub-date pub-type="epub"><day>8</day><month>1</month><year>2026</year></pub-date>',
+            $this->jats()
+        );
+
+        $result = $this->prepareJats($jats, 'jtest.pdf', '2025');
+
+        $this->assertIsString($result);
+        $xpath = $this->xpath($result);
+        $this->assertSame(
+            '2025',
+            $xpath->evaluate("string(//pub-date[@pub-type='collection']/year)")
+        );
+        $this->assertSame(
+            0,
+            $xpath->query("//pub-date[@date-type='collection']")->length,
+            'The two spellings should not be mixed in one document'
+        );
+    }
+
+    public function testACollectionDateInTheOlderSpellingIsNotDuplicated(): void
+    {
+        $jats = $this->jats('<pub-date pub-type="collection"><year>2024</year></pub-date>');
+
+        $result = $this->prepareJats($jats, 'jtest.pdf', '2025');
+
+        $this->assertIsString($result);
+        $this->assertSame(1, $this->xpath($result)->query("//pub-date[@pub-type='collection']")->length);
+        $this->assertSame(
+            0,
+            $this->xpath($result)->query("//pub-date[@date-type='collection']")->length
+        );
+    }
+
+    public function testTheCollectionDateIsNotAddedTwice(): void
+    {
+        $jats = $this->jats(
+            '<pub-date date-type="collection" publication-format="electronic"><year>2024</year></pub-date>'
+        );
+
+        $result = $this->prepareJats($jats, 'jtest.pdf', '2025');
+
+        $this->assertIsString($result);
+        $xpath = $this->xpath($result);
+        $this->assertSame(1, $xpath->query("//pub-date[@date-type='collection']")->length);
+        $this->assertSame(
+            '2024',
+            $xpath->evaluate("string(//pub-date[@date-type='collection']/year)"),
+            "The document's own collection date is left as it was written"
+        );
+    }
+
+    /**
+     * The section mapping fills in an article-type a generated document arrives without;
+     * a document that declares one keeps it.
+     */
+    public function testAnArticleTypeTheDocumentDeclaresIsKept(): void
+    {
+        $jats = str_replace('<article ', '<article article-type="case-report" ', $this->jats());
+
+        $result = $this->prepareJats($jats, 'jtest.pdf');
+
+        $this->assertIsString($result);
+        $this->assertSame(
+            'case-report',
+            $this->xpath($result)->query('/article')->item(0)->getAttribute('article-type')
+        );
+    }
+
     public function testDefaultJatsMissingJournalMetaReturnsAnError(): void
     {
         $jats = '<?xml version="1.0"?><article><front><article-meta>'
@@ -1365,7 +2452,15 @@ class PubmedCentralExportPluginTest extends PKPTestCase
 
         $this->assertSame(
             ['plugins.importexport.pmc.export.failure.jatsNodeMissing', 'journal-meta'],
-            $this->modifyJats('modifyDefaultJats', $jats, 'jtest.pdf')
+            $this->prepareJats($jats, 'jtest.pdf')
         );
+    }
+
+    //
+    // getExportableVersionStages()
+    //
+    public function testOnlyVersionsOfRecordAreListedForDeposit(): void
+    {
+        $this->assertSame([VersionStage::VERSION_OF_RECORD], $this->createPlugin()->getExportableVersionStages());
     }
 }

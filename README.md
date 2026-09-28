@@ -23,7 +23,7 @@ Before using this plugin, your journal should be approved for deposit by PubMed 
 
 To use the plugin, ensure that your journal has entered a publisher and at least one ISSN in the journal settings.
 
-Within the plugin settings, you will need to enter the PubMed Central FTP connection details and your journal's
+Within the plugin settings, you will need to enter the PubMed Central SFTP connection details and your journal's
 NLM Title Abbreviation.
 
 Articles to export to PubMed Central should meet the following requirements:
@@ -38,6 +38,30 @@ to disable validation for packages being sent to PubMed Central.
 
 Exported packages will include a PDF galley of the article if one is available in the submission's primary language.
 The plugin will add a link to the PDF in the JATS XML prior to export.
+
+### Media Files
+
+JATS XML may reference figures and other files, for example
+`<graphic xlink:href="figure1.jpg"/>`. Those files should be uploaded to the publication's media files, under the same
+file names the JATS XML refers to. The plugin packages each referenced file alongside the article and renames it to
+the scheme PubMed Central expects (`-g001` for a figure graphic, `-i001` for an inline graphic and `-s001` for
+supplementary material), updating the reference in the XML to match.
+
+If a media file is linked to a high-resolution version, the high-resolution file is the one packaged, since PubMed
+Central asks for the highest resolution available. Media files the XML does not reference are not packaged, because
+PubMed Central requires every file in a package to be referenced from the XML.
+
+A reference is matched to a media file by name, ignoring case and any folder in the reference, so
+`<graphic xlink:href="images/Figure1.JPG"/>` finds a media file named `figure1.jpg`. If no media file carries that
+name, the name without its extension is matched instead, so a reference to `figure1.tif` still finds a media file
+named `figure1.jpg` — but only where one media file carries that name, since packaging the wrong image is worse than
+stopping the export. Note that the name matched is the media file's name in OJS, which can be edited after upload: if
+it no longer matches the reference, the export stops, naming the reference and the media files that are available.
+
+Supplementary material is the one reference that may be removed rather than packaged: OJS-generated JATS points
+`<supplementary-material>` at a galley's download URL, which is not a file the plugin can package, so a reference still
+pointing at a URL once the media files are resolved is dropped. Supplementary material naming a media file is packaged
+and deposited like any other reference.
 
 For more details about PubMed Central requirements, refer to the
 [PubMed Central minimum data requirements](https://pmc.ncbi.nlm.nih.gov/pub/min_requirements/) and the
@@ -62,28 +86,63 @@ or from the first published version of the article when it is not assigned to an
 collection it was first published in, so publishing a new version in a later year does not move it, and the file names
 of a revised package continue to match the ones already deposited.
 
-Uploaded JATS XML is not modified, so those files should carry their own collection date.
+A document that already carries a collection date keeps the one it has, in whichever form it uses: JATS 1.2 pairs
+`@date-type` with `@publication-format`, and a document may still use the older `@pub-type`. A collection date the
+plugin adds is written in the same form as the document's own electronic publication date, since PubMed Central reads
+the two together.
 
 ### DOI Versioning
 
 If DOI versioning is enabled in OJS, then the user can deposit each major version of an article to PubMed Central.
 
+### Earlier Versions
+
+Only versions of record are listed for deposit, and each is deposited on its own. Earlier versions of other stages,
+such as a published manuscript under review, are not sent to PubMed Central.
+
 ### Deposits
 
 Deposits are queued: clicking Deposit (or the automatic deposit task running) dispatches one job per
 object, which builds that object's package, validates it, and uploads it. The request returns as soon
-as the jobs are queued, so a slow FTP endpoint never blocks the browser, and each object's outcome is
+as the jobs are queued, so a slow SFTP endpoint never blocks the browser, and each object's outcome is
 recorded against it individually. An object waiting on its job shows the Submitted status; when the
 job runs it becomes Deposited, or Failed with the error message.
 
-The FTP account is optional -- Export can be used to download packages and deliver them manually --
+The SFTP account is optional -- Export can be used to download packages and deliver them manually --
 but partially filling it in is not: either all of host, username, and password, or none. Automatic
 deposit requires a complete account. Deposit actions only appear once all three are set.
+
+## What the Plugin Changes in Your JATS
+
+Uploaded and OJS-generated JATS are prepared the same way. PubMed Central's requirements do not depend on where a
+document came from, and an uploaded document is often OJS's own JATS, saved and edited: a journal may export the
+generated JATS, add a body element, and upload the result. Every step below leaves a document that already meets the
+requirement alone, so a document prepared once and uploaded again is not changed twice.
+
+| Step                      | What it does                                                                                                                                                                                                                                           |
+|---------------------------|--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
+| PMC journal identifier    | Adds `<journal-id journal-id-type="pmc">` with the NLM title abbreviation, which the deposit is filed under.                                                                                                                                           |
+| Journal identifiers       | Removes every `journal-id` whose type the StyleChecker does not accept, such as the OJS and publisher identifiers.                                                                                                                                     |
+| Abbreviated journal title | Adds `<abbrev-journal-title abbrev-type="nlm-ta">` with the NLM title abbreviation.                                                                                                                                                                    |
+| Contributors              | Removes the journal's editorial team from the journal metadata, which PubMed Central asks to be left out, and keeps only authors and editors in the article metadata. PubMed Central accepts no other contributor type.                                |
+| Contributor names         | Removes `<string-name>` and unwraps `<name-alternatives>`, which PubMed Central rejects.                                                                                                                                                               |
+| Competing interests       | Keeps one copy of each competing interests statement, pointing every author who declared it at that copy. OJS records the statement for each author, so a statement several authors share would otherwise be repeated.                                 |
+| Collection date           | Adds the collection year, as described under Collection Date above.                                                                                                                                                                                    |
+| Volume                    | Adds `<volume>` with the collection year, unless the document has a volume of its own. PubMed Central requires a volume of every article, and takes the collection year in its place where a journal publishes no volume numbers.                      |
+| Media files               | Renames each referenced media file to PubMed Central's scheme and repoints the reference at it, as described under Media Files above.                                                                                                                  |
+| Supplementary material    | Removes `<supplementary-material>` still pointing at a URL after the media files are resolved, since PubMed Central cannot resolve a reference outside the package.                                                                                    |
+| PDF link                  | Replaces any PDF `<self-uri>` with one naming the PDF packaged alongside the XML.                                                                                                                                                                      |
+| Related articles          | Maps the `related-article-type` values PubMed Central rejects onto the nearest ones it accepts.                                                                                                                                                        |
+| Peer review relationships | Turns the peer review `<related-object>` elements into the `<related-article>` elements PubMed Central reads: a reviewer report names the article it reviews (`reviewed-article`), and an author's response the report it answers (`reviewer-report`). |
+| Empty paragraphs          | Removes paragraphs PubMed Central reads as empty, including those holding only a non-breaking space.                                                                                                                                                   |
+| Article type              | Sets `article-type` from the journal section, unless the document declares one of its own.                                                                                                                                                             |
+
+Every document is then validated against the JATS DTD and the PubMed Central StyleChecker. A document declaring a JATS
+version other than 1.2 skips DTD validation, with a warning, and is style checked as usual.
 
 ## Uploaded JATS XML
 
 If a publication has an uploaded JATS XML file, then that will be exported in the plugin instead of the OJS-generated JATS.
-Uploaded JATS XML files will also be validated against the DTD and StyleChecker.
 
 ## Troubleshooting
 

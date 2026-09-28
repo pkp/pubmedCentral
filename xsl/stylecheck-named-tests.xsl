@@ -1120,7 +1120,7 @@
                   <xsl:with-param name="nodes" select="graphic"/>
                </xsl:call-template>
             </xsl:if>
-            <xsl:if test="inilne-graphic">
+            <xsl:if test="inline-graphic">
                <xsl:call-template name="check-media-graphic-in-alt">
                   <xsl:with-param name="nodes" select="inline-graphic"/>
                </xsl:call-template>
@@ -1155,7 +1155,7 @@
                   <xsl:with-param name="nodes" select="graphic"/>
                </xsl:call-template>
             </xsl:if>
-            <xsl:if test="inilne-graphic">
+            <xsl:if test="inline-graphic">
                <xsl:call-template name="check-media-graphic-in-alt">
                   <xsl:with-param name="nodes" select="inline-graphic"/>
                </xsl:call-template>
@@ -1168,14 +1168,14 @@
                parent::disp-formula or
                parent::inline-formula">           
             <xsl:if
-               test="not(tex-math) and not(graphic) and not(mml:math) and not(media)">
+               test="not(tex-math) and not(graphic) and not(mml:math) and not(media) and not(textual-form)">
                <xsl:call-template name="make-error">
                   <xsl:with-param name="error-type">alternatives content
                      check</xsl:with-param>
                   <xsl:with-param name="description">
                      <xsl:text>&lt;alternatives&gt; in &lt;</xsl:text>
                      <xsl:value-of select="name(parent::node())"/>
-                     <xsl:text>&gt; must contain one of these elements: &lt;tex-math&gt;, &lt;graphic&gt;, &lt;media&gt;, or &lt;mml:math&gt;.</xsl:text>
+                     <xsl:text>&gt; must contain one of these elements: &lt;tex-math&gt;, &lt;graphic&gt;, &lt;media&gt;, &lt;textual-form&gt;, or &lt;mml:math&gt;.</xsl:text>
                   </xsl:with-param>
                   <xsl:with-param name="tg-target"
                      select="'tags/#el-alternatives'"/>
@@ -1195,7 +1195,7 @@
                      <xsl:with-param name="nodes" select="graphic"/>
                   </xsl:call-template>
                </xsl:if>
-               <xsl:if test="inilne-graphic">
+               <xsl:if test="inline-graphic">
                   <xsl:call-template name="check-media-graphic-in-alt">
                      <xsl:with-param name="nodes" select="inline-graphic"/>
                   </xsl:call-template>
@@ -1290,7 +1290,7 @@
                   <xsl:with-param name="nodes" select="graphic"/>
                </xsl:call-template>
             </xsl:if>
-            <xsl:if test="inilne-graphic">
+            <xsl:if test="inline-graphic">
                <xsl:call-template name="check-media-graphic-in-alt">
                   <xsl:with-param name="nodes" select="inline-graphic"/>
                </xsl:call-template>

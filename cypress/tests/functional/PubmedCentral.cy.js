@@ -27,7 +27,7 @@ describe('PubMed Central plugin tests', function () {
 		cy.get('nav').contains('Tools').click();
 		cy.contains(/PubMed Central Export Plugin/i, {timeout: 20000}).click();
 
-		// Configure the only required setting; FTP fields aren't exercised
+		// Configure the only required setting; SFTP fields aren't exercised
 		// by the export action (they're only used by the deposit flow).
 		cy.waitJQuery({timeout: 20000});
 		cy.get('form#pmcSettingsForm', {timeout: 20000}).should('be.visible');

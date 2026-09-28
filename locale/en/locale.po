@@ -10,11 +10,11 @@ msgstr ""
 msgid "plugins.importexport.pmc.description.short"
 msgstr "Export journal articles to PubMed Central."
 
-msgid "plugins.importexport.pmc.ftpLibraryMissing"
+msgid "plugins.importexport.pmc.sftpLibraryMissing"
 msgstr ""
-"<blockquote style=\"border: 1px solid; padding: 1em;\"><strong>⚠️ Warning:</strong> The <code>league/flysystem-ftp</code> library is missing from your server. To install it, run:\n"
-"<pre><code>composer -d lib/pkp require league/flysystem-ftp</code></pre>"
-"...or upgrade to a newer release of OJS. Until this is resolved, <strong>FTP deposits will not work</strong>. SFTP deposits can still be used.</blockquote>"
+"<blockquote style=\"border: 1px solid; padding: 1em;\"><strong>⚠️ Warning:</strong> The <code>league/flysystem-sftp-v3</code> library is missing from your server. To install it, run:\n"
+"<pre><code>composer -d lib/pkp require league/flysystem-sftp-v3</code></pre>"
+"...or upgrade to a newer release of OJS. Until this is resolved, <strong>SFTP deposits will not work</strong>. Packages can still be downloaded and delivered manually.</blockquote>"
 
 msgid "plugins.importexport.pmc.missingFields"
 msgstr ""
@@ -34,7 +34,7 @@ msgid "plugins.importexport.pmc.path"
 msgstr "Path"
 
 msgid "plugins.importexport.pmc.port"
-msgstr "Port (optional, defaults to 21)"
+msgstr "Port (optional, defaults to 22)"
 
 msgid "plugins.importexport.pmc.endpoint"
 msgstr "Connection Details"
@@ -90,9 +90,6 @@ msgstr "Unable to transform XSL for style checking."
 msgid "plugins.importexport.pmc.export.failure.xslFileNotFound"
 msgstr "Unable to transform XSL for style checking - XSL file not found."
 
-msgid "plugins.importexport.pmc.export.failure.jatsModification"
-msgstr "JATS modifications failed. The system returned errors: '{$param}'"
-
 msgid "plugins.importexport.pmc.export.failure.loadJats"
 msgstr "Failed to convert JATS to XML for modifications."
 
@@ -112,8 +109,16 @@ msgstr "The journal this deposit was queued for could not be found."
 
 msgid "plugins.importexport.pmc.export.failure.missingMediaFile"
 msgstr ""
-"The following file is referenced in the JATS XML but could not be found in the system: '{$param}'."
-"Remove the file from the JATS or upload it to the publication's media files and try again."
+"A file referenced in the JATS XML could not be matched to the publication's media files. {$param} "
+"Remove the reference from the JATS, or upload the file to the publication's media files, and try again."
+
+msgid "plugins.importexport.pmc.export.failure.missingMediaFile.available"
+msgstr ""
+"'{$reference}' does not match any of the media files available: {$files}."
+
+msgid "plugins.importexport.pmc.export.failure.missingMediaFile.none"
+msgstr ""
+"'{$reference}' was referenced, but the publication has no media files."
 
 msgid "plugins.importexport.pmc.settings.form.automaticRegistration.description"
 msgstr ""
@@ -128,7 +133,7 @@ msgid "plugins.importexport.pmc.settings.form.accountIncomplete"
 msgstr "Please provide the host, username and password, or leave all three blank."
 
 msgid "plugins.importexport.pmc.settings.form.automaticRegistrationRequiresAccount"
-msgstr "Automatic deposit requires a complete FTP account: please provide the host, username and password."
+msgstr "Automatic deposit requires a complete SFTP account: please provide the host, username and password."
 
 msgid "plugins.importexport.pmc.settings.form.jatsImportedOnly"
 msgstr ""

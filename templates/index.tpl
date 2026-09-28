@@ -35,9 +35,9 @@
 				{rdelim});
 		</script>
 
-		{capture assign="ftpWarning"}
-			{if $ftpLibraryMissing}
-				{translate key="plugins.importexport.pmc.ftpLibraryMissing"}
+		{capture assign="sftpWarning"}
+			{if $sftpLibraryMissing}
+				{translate key="plugins.importexport.pmc.sftpLibraryMissing"}
 			{/if}
 		{/capture}
 
@@ -55,7 +55,7 @@
 				{/if}
 			</ul>
 			<div id="settings-tab">
-				{$ftpWarning}
+				{$sftpWarning}
 				{if !$allowExport}
 					<div class="pkp_notification" id="pmcConfigurationErrors">
 						{foreach from=$configurationErrors item=configurationError}
