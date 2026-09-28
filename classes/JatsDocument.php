@@ -39,22 +39,26 @@ class JatsDocument
 
     /**
      * The document-type values the JATS4R peer review recommendation puts on a
-     * related-object, mapped to the link-type PMC gives the same relationship. PMC
-     * reads a related-object that names a journal article only with
-     * document-type="article", and takes the relationship from link-type. Its style
-     * checker allows a narrower set of link-type values than related-article-type
-     * has: the reviewed article is "peer-reviewed-article" and a review is
-     * "peer-review", and there is no value for an editor's report or an author's
-     * comment, so those are left as they are.
+     * related-object, mapped to the related-article-type PMC gives the same relationship.
      *
-     * @see https://pmc.ncbi.nlm.nih.gov/tagging-guidelines/article/tags/#el-relobj
-     * @see https://pmc.ncbi.nlm.nih.gov/tagging-guidelines/article/dobs/#dob-peer-review
-     * @see xsl/stylecheck-named-tests.xsl, the related-object-check template
+     * @see https://pmc.ncbi.nlm.nih.gov/tagging-guidelines/article/dobs/#dob-peerreviewdocs
      */
-    protected const PMC_RELATED_OBJECT_LINK_TYPES = [
-        'peer-reviewed-article' => 'peer-reviewed-article',
-        'peer-review-report' => 'peer-review',
-        'reviewer-report' => 'peer-review',
+    protected const PMC_PEER_REVIEW_RELATED_ARTICLE_TYPES = [
+        'peer-reviewed-article' => 'reviewed-article',
+        'peer-review-report' => 'reviewer-report',
+        'reviewer-report' => 'reviewer-report',
+    ];
+
+    /**
+     * The elements the JATS content model places after volume in article-meta.
+     */
+    protected const AFTER_VOLUME = [
+        'volume-id', 'volume-series', 'issue', 'issue-id', 'issue-title', 'issue-sponsor',
+        'issue-part', 'volume-issue-group', 'isbn', 'supplement', 'fpage', 'lpage', 'page-range',
+        'elocation-id', 'email', 'ext-link', 'uri', 'product', 'supplementary-material', 'history',
+        'pub-history', 'permissions', 'self-uri', 'related-article', 'related-object', 'abstract',
+        'trans-abstract', 'kwd-group', 'funding-group', 'support-group', 'conference', 'counts',
+        'custom-meta-group',
     ];
 
     /**
@@ -199,7 +203,9 @@ class JatsDocument
         }
 
         $this->unwrapNameAlternatives();
+        $this->removeDuplicateCompetingInterests();
         $this->addCollectionDate($collectionYear);
+        $this->addVolume();
 
         if ($error = $this->packageMediaReferences()) {
             return $error;
@@ -213,7 +219,7 @@ class JatsDocument
         }
 
         $this->remapRelatedArticleTypes();
-        $this->rewriteRelatedObjects();
+        $this->convertPeerReviewRelatedObjects();
         $this->removeEmptyParagraphs();
         $this->setArticleType();
 
@@ -313,29 +319,63 @@ class JatsDocument
     }
 
     /**
-     * Remove the contributors PMC does not accept. Its style check allows an editor in the
-     * journal metadata, and an author or editor in the article metadata; the contributor
-     * roles can also produce translators, reviewers, readers and others.
+     * Remove the contributors PMC does not accept: the journal's editorial team,
+     * and in the article metadata any contributor but an author or editor.
      */
     protected function removeUnsupportedContributors(): ?array
     {
         if ($journalMeta = $this->journalMeta()) {
-            $this->removeNodes("contrib-group/contrib[not(@contrib-type='editor')]", $journalMeta);
+            $this->removeNodes('contrib-group', $journalMeta);
         }
 
         if (!$articleMeta = $this->articleMeta()) {
             return ['plugins.importexport.pmc.export.failure.jatsNodeMissing', 'article-meta'];
         }
 
-        $this->removeNodes(
+        // What only the removed contributors referred to goes with them: an affiliation or
+        // competing interests statement left behind would be published for no one listed.
+        // Anything the document never linked to a contributor stays as it is.
+        $removed = $this->xpath->query(
             "contrib-group/contrib[not(@contrib-type='author' or @contrib-type='editor')]",
             $articleMeta
         );
+        $orphanCandidates = $this->referencedIds($removed);
+        foreach ($removed as $contrib) {
+            $contrib->parentNode->removeChild($contrib);
+        }
 
-        // Drop a contrib-group the removals emptied
+        $stillReferenced = $this->referencedIds([$this->dom->documentElement]);
+        $ownedByContributors = "aff[@id] | contrib-group/aff[@id] | author-notes/fn[@id][translate(@fn-type, 'COISTAEMN', 'coistaemn')='coi-statement']";
+        foreach ($this->xpath->query($ownedByContributors, $articleMeta) as $node) { /** @var DOMElement $node */
+            $id = $node->getAttribute('id');
+            if (isset($orphanCandidates[$id]) && !isset($stillReferenced[$id])) {
+                $node->parentNode->removeChild($node);
+            }
+        }
+
+        // Drop a contrib-group or author-notes the removals emptied
         $this->removeNodes('//contrib-group[not(*) and not(normalize-space())]');
+        $this->removeNodes('author-notes[not(*)]', $articleMeta);
 
         return null;
+    }
+
+    /**
+     * The ids the xrefs within the given elements point at.
+     *
+     * @return array<string, true>
+     */
+    protected function referencedIds(iterable $elements): array
+    {
+        $ids = [];
+        foreach ($elements as $element) {
+            foreach ($this->xpath->query('.//xref/@rid', $element) as $rid) {
+                foreach (preg_split('/\s+/', trim($rid->value)) as $id) {
+                    $ids[$id] = true;
+                }
+            }
+        }
+        return $ids;
     }
 
     /**
@@ -478,20 +518,95 @@ class JatsDocument
     }
 
     /**
-     * Rewrite the related-object elements that link peer review sub-articles to the
-     * article into the form PMC requires.
-     *
-     * @see https://pmc.ncbi.nlm.nih.gov/tagging-guidelines/article/tags/#el-relobj
+     * Turn the related-object elements that link peer review materials into the
+     * related-article elements PMC reads them from, naming the related material by DOI.
+     * OJS follows the JATS4R recommendation to use related-object, but PMC uses related-article.
      */
-    protected function rewriteRelatedObjects(): void
+    protected function convertPeerReviewRelatedObjects(): void
     {
-        foreach (self::PMC_RELATED_OBJECT_LINK_TYPES as $documentType => $linkType) {
-            foreach ($this->xpath->query("//related-object[@document-type='{$documentType}']") as $node) {
-                /** @var DOMElement $node */
-                $node->setAttribute('document-type', 'article');
-                $node->setAttribute('link-type', $linkType);
+        foreach (self::PMC_PEER_REVIEW_RELATED_ARTICLE_TYPES as $documentType => $relatedArticleType) {
+            $query = "//related-object[@document-type='{$documentType}' and @document-id-type='doi' and @document-id]";
+            foreach ($this->xpath->query($query) as $node) { /** @var DOMElement $node */
+                $relatedArticle = $this->dom->createElement('related-article');
+                if ($node->hasAttribute('id')) {
+                    $relatedArticle->setAttribute('id', $node->getAttribute('id'));
+                }
+                $relatedArticle->setAttribute('related-article-type', $relatedArticleType);
+                $relatedArticle->setAttribute('ext-link-type', 'doi');
+                $relatedArticle->setAttributeNS(self::XLINK_NS, 'xlink:href', $node->getAttribute('document-id'));
+                $node->parentNode->replaceChild($relatedArticle, $node);
             }
         }
+    }
+
+    /**
+     * Keep a single copy of each competing interests statement, ensuring none are duplicated
+     * (e.g. "No competing interests were disclosed".)
+     *
+     * OJS records competing interests for each author, so a statement several authors
+     * share is repeated once for each of them, while the article publishes it once. Each
+     * author's reference is pointed at the copy that is kept.
+     */
+    protected function removeDuplicateCompetingInterests(): void
+    {
+        foreach ($this->xpath->query('//author-notes') as $authorNotes) {
+            $kept = [];
+            foreach ($this->xpath->query('fn', $authorNotes) as $fn) { /** @var DOMElement $fn */
+                if (strtolower($fn->getAttribute('fn-type')) !== 'coi-statement') {
+                    continue;
+                }
+                $statement = trim(preg_replace('/[\s\x{00A0}]+/u', ' ', $fn->textContent));
+                if (!isset($kept[$statement])) {
+                    $kept[$statement] = $fn->getAttribute('id');
+                    continue;
+                }
+
+                $id = $fn->getAttribute('id');
+                if ($id !== '' && $kept[$statement] !== '') {
+                    foreach ($this->xpath->query("//xref[@ref-type='author-notes' and @rid='{$id}']") as $xref) {
+                        /** @var DOMElement $xref */
+                        $xref->setAttribute('rid', $kept[$statement]);
+                        // An author referring to both copies needs only the one
+                        $siblings = $this->xpath->query(
+                            "preceding-sibling::xref[@ref-type='author-notes' and @rid='{$kept[$statement]}']",
+                            $xref
+                        );
+                        if ($siblings->length) {
+                            $xref->parentNode->removeChild($xref);
+                        }
+                    }
+                }
+                $fn->parentNode->removeChild($fn);
+            }
+        }
+    }
+
+    /**
+     * Add the volume, which PMC requires for every article. If the journal publishes no
+     * volume numbers, PMC takes the collection year in its place.
+     */
+    protected function addVolume(): void
+    {
+        if (!($articleMeta = $this->articleMeta()) || $this->xpath->query('volume', $articleMeta)->length) {
+            return;
+        }
+
+        $year = trim($this->xpath->evaluate(
+            "string(pub-date[@date-type='collection' or @pub-type='collection'][1]/year)",
+            $articleMeta
+        ));
+        if ($year === '') {
+            return;
+        }
+
+        $following = null;
+        foreach ($articleMeta->childNodes as $child) {
+            if ($child instanceof DOMElement && in_array($child->nodeName, self::AFTER_VOLUME, true)) {
+                $following = $child;
+                break;
+            }
+        }
+        $articleMeta->insertBefore($this->dom->createElement('volume', $year), $following);
     }
 
     /**

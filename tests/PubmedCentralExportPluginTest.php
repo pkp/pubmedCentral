@@ -196,7 +196,7 @@ class PubmedCentralExportPluginTest extends PKPTestCase
 
             public function __construct(private array $paths)
             {
-                $this->fs = new class {
+                $this->fs = new class () {
                     public function read(string $path): string
                     {
                         return "contents of {$path}";
@@ -887,7 +887,7 @@ class PubmedCentralExportPluginTest extends PKPTestCase
         $genre->setData('supplementary', false);
         $genre->setData('dependent', false);
         $genreDao = $this->createMock(GenreDAO::class);
-        $genreDao->method('getEnabledByContextId')->willReturn(collect([]));
+        $genreDao->method('getEnabledByContextId')->willReturn(collect());
         $genreDao->method('getById')->willReturn($genre);
         DAORegistry::registerDAO('GenreDAO', $genreDao);
 
@@ -1929,7 +1929,11 @@ class PubmedCentralExportPluginTest extends PKPTestCase
         );
     }
 
-    public function testPeerReviewRelatedObjectsAreRewrittenForPmc(): void
+    /**
+     * PMC reads the relationships between peer review materials from related-article:
+     * a report names the article it reviews, and an author's response the report it answers.
+     */
+    public function testPeerReviewRelatedObjectsBecomeRelatedArticles(): void
     {
         $subArticles = <<<'XML'
             <sub-article id="rr1" article-type="reviewer-report">
@@ -1954,14 +1958,17 @@ class PubmedCentralExportPluginTest extends PKPTestCase
         $this->assertIsString($result);
         $xpath = $this->xpath($result);
 
-        $reviewedArticle = $xpath->query('//sub-article[@id="rr1"]/front-stub/related-object')->item(0);
-        $this->assertSame('article', $reviewedArticle->getAttribute('document-type'));
-        $this->assertSame('peer-reviewed-article', $reviewedArticle->getAttribute('link-type'));
-        $this->assertSame('10.1234/test.1', $reviewedArticle->getAttribute('document-id'), 'The target is kept');
+        $this->assertSame(0, $xpath->query('//related-object')->length);
 
-        $reviewerReport = $xpath->query('//sub-article[@id="ar1"]/front-stub/related-object')->item(0);
-        $this->assertSame('article', $reviewerReport->getAttribute('document-type'));
-        $this->assertSame('peer-review', $reviewerReport->getAttribute('link-type'));
+        $reviewedArticle = $xpath->query('//sub-article[@id="rr1"]/front-stub/related-article')->item(0);
+        $this->assertSame('ro1', $reviewedArticle->getAttribute('id'));
+        $this->assertSame('reviewed-article', $reviewedArticle->getAttribute('related-article-type'));
+        $this->assertSame('doi', $reviewedArticle->getAttribute('ext-link-type'));
+        $this->assertSame('10.1234/test.1', $reviewedArticle->getAttribute('xlink:href'));
+
+        $reviewerReport = $xpath->query('//sub-article[@id="ar1"]/front-stub/related-article')->item(0);
+        $this->assertSame('reviewer-report', $reviewerReport->getAttribute('related-article-type'));
+        $this->assertSame('10.1234/test.r1', $reviewerReport->getAttribute('xlink:href'));
     }
 
     public function testRelatedObjectsNamingOtherThingsAreLeftAlone(): void
@@ -1982,7 +1989,186 @@ class PubmedCentralExportPluginTest extends PKPTestCase
 
         $relatedObject = $this->xpath($result)->query('//related-object')->item(0);
         $this->assertSame('chapter', $relatedObject->getAttribute('document-type'));
-        $this->assertFalse($relatedObject->hasAttribute('link-type'));
+        $this->assertSame(0, $this->xpath($result)->query('//related-article')->length);
+    }
+
+    /**
+     * PMC asks for the journal's editorial team to be left out of the article.
+     */
+    public function testTheJournalEditorialTeamIsRemoved(): void
+    {
+        $jats = str_replace(
+            '</journal-title-group>',
+            '</journal-title-group><contrib-group><contrib contrib-type="editor">'
+                . '<name><surname>Itor</surname><given-names>Ed</given-names></name></contrib></contrib-group>',
+            $this->jats()
+        );
+
+        $result = $this->prepareJats($jats, 'jtest.pdf');
+
+        $this->assertIsString($result);
+        $this->assertSame(0, $this->xpath($result)->query('//journal-meta/contrib-group')->length);
+    }
+
+    /**
+     * An affiliation or competing interests statement only a removed contributor referred
+     * to would be published for no one listed, so it goes with them; one an author still
+     * refers to stays.
+     */
+    public function testWhatOnlyARemovedContributorReferredToIsRemoved(): void
+    {
+        $contributors = <<<'XML'
+            <contrib-group>
+                <contrib contrib-type="author"><name><surname>A</surname></name>
+                    <xref ref-type="aff" rid="aff-1"/><xref ref-type="author-notes" rid="con-1"/></contrib>
+                <contrib contrib-type="translator"><name><surname>T</surname></name>
+                    <xref ref-type="aff" rid="aff-1"/><xref ref-type="aff" rid="aff-2"/>
+                    <xref ref-type="author-notes" rid="con-1"/><xref ref-type="author-notes" rid="con-2"/></contrib>
+            </contrib-group>
+            <aff id="aff-1"><institution>Shared</institution></aff>
+            <aff id="aff-2"><institution>Translator only</institution></aff>
+            <author-notes>
+                <fn fn-type="coi-statement" id="con-1"><p>None.</p></fn>
+                <fn fn-type="coi-statement" id="con-2"><p>The translator's own.</p></fn>
+            </author-notes>
+            XML;
+
+        $result = $this->prepareJats($this->jats($contributors), 'jtest.pdf');
+
+        $this->assertIsString($result);
+        $xpath = $this->xpath($result);
+        $this->assertSame(['aff-1'], array_map(fn ($n) => $n->getAttribute('id'), iterator_to_array($xpath->query('//article-meta/aff'))));
+        $this->assertSame(['con-1'], array_map(fn ($n) => $n->getAttribute('id'), iterator_to_array($xpath->query('//author-notes/fn'))));
+    }
+
+    /**
+     * A document may carry an affiliation or statement it never linked to a contributor,
+     * such as one affiliation for every author; that is not the removal's to take away.
+     */
+    public function testWhatNoContributorReferredToIsKept(): void
+    {
+        $contributors = <<<'XML'
+            <contrib-group>
+                <contrib contrib-type="author"><name><surname>A</surname></name></contrib>
+                <contrib contrib-type="translator"><name><surname>T</surname></name></contrib>
+            </contrib-group>
+            <aff id="aff-1"><institution>Everyone's</institution></aff>
+            <author-notes><fn fn-type="coi-statement" id="con-1"><p>None.</p></fn></author-notes>
+            XML;
+
+        $result = $this->prepareJats($this->jats($contributors), 'jtest.pdf');
+
+        $xpath = $this->xpath($result);
+        $this->assertSame(1, $xpath->query('//article-meta/aff')->length);
+        $this->assertSame(1, $xpath->query('//author-notes/fn')->length);
+    }
+
+    public function testAuthorNotesEmptiedByTheRemovalAreRemoved(): void
+    {
+        $contributors = <<<'XML'
+            <contrib-group>
+                <contrib contrib-type="author"><name><surname>A</surname></name></contrib>
+                <contrib contrib-type="translator"><name><surname>T</surname></name>
+                    <xref ref-type="author-notes" rid="con-1"/></contrib>
+            </contrib-group>
+            <author-notes><fn fn-type="coi-statement" id="con-1"><p>The translator's own.</p></fn></author-notes>
+            XML;
+
+        $result = $this->prepareJats($this->jats($contributors), 'jtest.pdf');
+
+        $this->assertSame(0, $this->xpath($result)->query('//article-meta/author-notes')->length);
+    }
+
+    /**
+     * OJS records competing interests for each author, so eleven authors declaring none
+     * give eleven copies of one statement; the article publishes it once.
+     */
+    public function testACompetingInterestsStatementSharedByAuthorsIsKeptOnce(): void
+    {
+        $contribGroup = <<<'XML'
+            <contrib-group>
+                <contrib contrib-type="author"><name><surname>A</surname></name><xref ref-type="author-notes" rid="con-1"/></contrib>
+                <contrib contrib-type="author"><name><surname>B</surname></name><xref ref-type="author-notes" rid="con-2"/></contrib>
+                <contrib contrib-type="author"><name><surname>C</surname></name><xref ref-type="author-notes" rid="con-3"/></contrib>
+            </contrib-group>
+            <author-notes>
+                <fn fn-type="coi-statement" id="con-1"><p>No competing interests were disclosed.</p></fn>
+                <fn fn-type="coi-statement" id="con-2"><p>No competing interests  were disclosed.</p></fn>
+                <fn fn-type="coi-statement" id="con-3"><p>C is a director of a company.</p></fn>
+            </author-notes>
+            XML;
+
+        $result = $this->prepareJats($this->jats($contribGroup), 'jtest.pdf');
+
+        $this->assertIsString($result);
+        $xpath = $this->xpath($result);
+        $this->assertSame(
+            ['con-1', 'con-3'],
+            array_map(fn ($fn) => $fn->getAttribute('id'), iterator_to_array($xpath->query("//author-notes/fn")))
+        );
+        $this->assertSame(
+            ['con-1', 'con-1', 'con-3'],
+            array_map(fn ($xref) => $xref->getAttribute('rid'), iterator_to_array($xpath->query('//contrib/xref')))
+        );
+    }
+
+    /**
+     * A sub-article's statements are its own, and are not merged with the article's.
+     */
+    public function testCompetingInterestsInASubArticleAreKeptSeparately(): void
+    {
+        $authorNotes = '<author-notes><fn fn-type="coi-statement" id="con-1"><p>None.</p></fn></author-notes>';
+        $subArticle = '<sub-article id="rr1" article-type="reviewer-report"><front-stub>'
+            . '<author-notes><fn fn-type="COI-statement" id="rr1-con"><p>None.</p></fn></author-notes>'
+            . '</front-stub></sub-article>';
+
+        $result = $this->prepareJats(
+            str_replace('</article>', $subArticle . '</article>', $this->jats($authorNotes)),
+            'jtest.pdf'
+        );
+
+        $this->assertIsString($result);
+        $this->assertSame(2, $this->xpath($result)->query('//author-notes/fn')->length);
+    }
+
+    /**
+     * PMC requires a volume of every article, and takes the collection year in its place
+     * where the journal publishes no volume numbers.
+     */
+    public function testTheCollectionYearStandsInForAMissingVolume(): void
+    {
+        $result = $this->prepareJats($this->jats('<elocation-id>e123</elocation-id>'), 'jtest.pdf', '2025');
+
+        $this->assertIsString($result);
+        $xpath = $this->xpath($result);
+        $this->assertSame('2025', $xpath->evaluate('string(//article-meta/volume)'));
+        $this->assertSame(
+            ['title-group', 'pub-date', 'pub-date', 'volume', 'elocation-id', 'self-uri', 'abstract'],
+            array_map(fn ($node) => $node->nodeName, iterator_to_array($xpath->query('//article-meta/*'))),
+            'The volume follows the publication dates, where the JATS content model places it'
+        );
+    }
+
+    /**
+     * PMC asks for the same year as the collection date, so a document carrying its own
+     * collection date decides it.
+     */
+    public function testTheVolumeFollowsTheDocumentsOwnCollectionDate(): void
+    {
+        $jats = $this->jats('<pub-date pub-type="collection"><year>2024</year></pub-date>');
+
+        $result = $this->prepareJats($jats, 'jtest.pdf', '2025');
+
+        $this->assertSame('2024', $this->xpath($result)->evaluate('string(//article-meta/volume)'));
+    }
+
+    public function testAVolumeTheDocumentDeclaresIsKept(): void
+    {
+        $result = $this->prepareJats($this->jats('<volume>14</volume>'), 'jtest.pdf', '2025');
+
+        $xpath = $this->xpath($result);
+        $this->assertSame(1, $xpath->query('//article-meta/volume')->length);
+        $this->assertSame('14', $xpath->evaluate('string(//article-meta/volume)'));
     }
 
     public function testDefaultJatsUnwrapsNameAlternatives(): void

@@ -119,21 +119,23 @@ document came from, and an uploaded document is often OJS's own JATS, saved and 
 generated JATS, add a body element, and upload the result. Every step below leaves a document that already meets the
 requirement alone, so a document prepared once and uploaded again is not changed twice.
 
-| Step | What it does |
-| --- | --- |
-| PMC journal identifier | Adds `<journal-id journal-id-type="pmc">` with the NLM title abbreviation, which the deposit is filed under. |
-| Journal identifiers | Removes every `journal-id` whose type the StyleChecker does not accept, such as the OJS and publisher identifiers. |
-| Abbreviated journal title | Adds `<abbrev-journal-title abbrev-type="nlm-ta">` with the NLM title abbreviation. |
-| Contributors | Keeps only editors in the journal metadata, and only authors and editors in the article metadata. PubMed Central accepts no other contributor type. |
-| Contributor names | Removes `<string-name>` and unwraps `<name-alternatives>`, which PubMed Central rejects. |
-| Collection date | Adds the collection year, as described under Collection Date above. |
-| Media files | Renames each referenced media file to PubMed Central's scheme and repoints the reference at it, as described under Media Files above. |
-| Supplementary material | Removes `<supplementary-material>` still pointing at a URL after the media files are resolved, since PubMed Central cannot resolve a reference outside the package. |
-| PDF link | Replaces any PDF `<self-uri>` with one naming the PDF packaged alongside the XML. |
-| Related articles | Maps the `related-article-type` values PubMed Central rejects onto the nearest ones it accepts. |
-| Related objects | Rewrites the peer review `<related-object>` elements into the `document-type` and `link-type` combination PubMed Central requires. |
-| Empty paragraphs | Removes paragraphs PubMed Central reads as empty, including those holding only a non-breaking space. |
-| Article type | Sets `article-type` from the journal section, unless the document declares one of its own. |
+| Step                      | What it does                                                                                                                                                                                                                                           |
+|---------------------------|--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
+| PMC journal identifier    | Adds `<journal-id journal-id-type="pmc">` with the NLM title abbreviation, which the deposit is filed under.                                                                                                                                           |
+| Journal identifiers       | Removes every `journal-id` whose type the StyleChecker does not accept, such as the OJS and publisher identifiers.                                                                                                                                     |
+| Abbreviated journal title | Adds `<abbrev-journal-title abbrev-type="nlm-ta">` with the NLM title abbreviation.                                                                                                                                                                    |
+| Contributors              | Removes the journal's editorial team from the journal metadata, which PubMed Central asks to be left out, and keeps only authors and editors in the article metadata. PubMed Central accepts no other contributor type.                                |
+| Contributor names         | Removes `<string-name>` and unwraps `<name-alternatives>`, which PubMed Central rejects.                                                                                                                                                               |
+| Competing interests       | Keeps one copy of each competing interests statement, pointing every author who declared it at that copy. OJS records the statement for each author, so a statement several authors share would otherwise be repeated.                                 |
+| Collection date           | Adds the collection year, as described under Collection Date above.                                                                                                                                                                                    |
+| Volume                    | Adds `<volume>` with the collection year, unless the document has a volume of its own. PubMed Central requires a volume of every article, and takes the collection year in its place where a journal publishes no volume numbers.                      |
+| Media files               | Renames each referenced media file to PubMed Central's scheme and repoints the reference at it, as described under Media Files above.                                                                                                                  |
+| Supplementary material    | Removes `<supplementary-material>` still pointing at a URL after the media files are resolved, since PubMed Central cannot resolve a reference outside the package.                                                                                    |
+| PDF link                  | Replaces any PDF `<self-uri>` with one naming the PDF packaged alongside the XML.                                                                                                                                                                      |
+| Related articles          | Maps the `related-article-type` values PubMed Central rejects onto the nearest ones it accepts.                                                                                                                                                        |
+| Peer review relationships | Turns the peer review `<related-object>` elements into the `<related-article>` elements PubMed Central reads: a reviewer report names the article it reviews (`reviewed-article`), and an author's response the report it answers (`reviewer-report`). |
+| Empty paragraphs          | Removes paragraphs PubMed Central reads as empty, including those holding only a non-breaking space.                                                                                                                                                   |
+| Article type              | Sets `article-type` from the journal section, unless the document declares one of its own.                                                                                                                                                             |
 
 Every document is then validated against the JATS DTD and the PubMed Central StyleChecker. A document declaring a JATS
 version other than 1.2 skips DTD validation, with a warning, and is style checked as usual.
