@@ -15,6 +15,7 @@
 namespace APP\plugins\generic\pubmedCentral;
 
 use APP\plugins\PubObjectsExportGenericPlugin;
+use PKP\plugins\Hook;
 use PKP\plugins\PluginRegistry;
 
 class PubmedCentralPlugin extends PubObjectsExportGenericPlugin
@@ -43,6 +44,17 @@ class PubmedCentralPlugin extends PubObjectsExportGenericPlugin
     public function getDescription(): string
     {
         return __('plugins.generic.pmc.description');
+    }
+
+    /**
+     * @copydoc PubObjectsExportGenericPlugin::handleIdentityRestamped()
+     *
+     * Overridden to do nothing: the deposited journal-meta uses the journal's current identity,
+     * so a re-stamp must not mark an already-delivered article stale and re-send it to PMC.
+     */
+    public function handleIdentityRestamped($hookName, $params): bool
+    {
+        return Hook::CONTINUE;
     }
 
     protected function setExportPlugin(): void
