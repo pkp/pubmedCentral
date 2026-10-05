@@ -135,7 +135,6 @@ class PubmedCentralSettingsForm extends PubObjectsExportSettingsForm
     public function getFormFields(): array
     {
         return [
-            'jatsImported' => 'bool',
             'automaticRegistration' => 'bool',
             'nlmTitle' => 'string',
             'namingType' => 'string',
@@ -150,7 +149,6 @@ class PubmedCentralSettingsForm extends PubObjectsExportSettingsForm
     public function isOptional(string $settingName): bool
     {
         return in_array($settingName, [
-            'jatsImported',
             'automaticRegistration',
             'namingType',
             'host',

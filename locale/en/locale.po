@@ -5,10 +5,10 @@ msgid "plugins.importexport.pmc.description"
 msgstr ""
 "This plugin may be used to export your journal content to <a href=\"https://www.pmc.ncbi.nlm.nih.gov.org\" target=\"_blank\">PubMed Central</a>. "
 "Content can be downloaded for later delivery to PubMed Central, or sent to your account on the PubMed Central server by "
-"configuring your credentials below."
+"configuring your credentials below. Only articles with an uploaded JATS XML file can be exported."
 
 msgid "plugins.importexport.pmc.description.short"
-msgstr "Export journal articles to PubMed Central."
+msgstr "Export journal articles with uploaded JATS XML to PubMed Central."
 
 msgid "plugins.importexport.pmc.sftpLibraryMissing"
 msgstr ""
@@ -51,7 +51,7 @@ msgid "plugins.importexport.pmc.export.failure.settings"
 msgstr "To export the issues to PubMed Central you must setup the credentials in the settings tab."
 
 msgid "plugins.importexport.pmc.export.failure.jatsFileNotFound"
-msgstr "No suitable JATS XML file was found for export."
+msgstr "No uploaded JATS XML file was found for export. Upload a JATS XML file to the publication and try again."
 
 msgid "plugins.importexport.pmc.export.failure.multipleArticleFiles"
 msgstr ""
@@ -122,9 +122,9 @@ msgstr ""
 
 msgid "plugins.importexport.pmc.settings.form.automaticRegistration.description"
 msgstr ""
-"Deposit articles automatically to PubMed Central. Please note that this may "
-"take a short amount of time after publication to process (e.g. depending on "
-"your cronjob configuration)."
+"Deposit newly published articles to PubMed Central automatically. Deposits are "
+"sent once a day, so an article may take up to a day after publication to "
+"reach PubMed Central."
 
 msgid "plugins.importexport.pmc.settings.form.nlmTitleRequired"
 msgstr "Please provide the journal's NLM Title Abbreviation."
@@ -134,11 +134,6 @@ msgstr "Please provide the host, username and password, or leave all three blank
 
 msgid "plugins.importexport.pmc.settings.form.automaticRegistrationRequiresAccount"
 msgstr "Automatic deposit requires a complete SFTP account: please provide the host, username and password."
-
-msgid "plugins.importexport.pmc.settings.form.jatsImportedOnly"
-msgstr ""
-"Only allow exports for articles with uploaded JATS XML files. If not enabled, the plugin will use "
-"system-generated JATS when no JATS XML file is present."
 
 msgid "plugins.importexport.pmc.settings.form.nlmTitle"
 msgstr "NLM Title Abbreviation"
@@ -165,4 +160,4 @@ msgid "plugins.generic.pmc.displayName"
 msgstr "PubMed Central Plugin"
 
 msgid "plugins.generic.pmc.description"
-msgstr "Exports articles or article versions to PubMed Central."
+msgstr "Exports articles or article versions with uploaded JATS XML to PubMed Central."
