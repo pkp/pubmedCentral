@@ -293,7 +293,7 @@ class PubmedCentralExportPlugin extends PubObjectsExportPlugin implements HasTas
                 $request->redirect(null, null, null, ['plugin', $this->getName()], null, $tab);
             } else {
                 $nlmTitle = $this->nlmTitle($context);
-                $filename = $this->buildFileName($nlmTitle, $context, null, false, 'zip');
+                $filename = $this->buildFileName($nlmTitle, $context, null, true, 'zip');
                 if (count($objects) == 1) {
                     $object = array_shift($objects);
                     $filename = $this->buildFileName($nlmTitle, $context, $object, true, 'zip');
@@ -357,15 +357,11 @@ class PubmedCentralExportPlugin extends PubObjectsExportPlugin implements HasTas
         $document = Repo::jats()
             ->getJatsFile($publication->getId(), $submissionId, $genres->toArray());
 
-        // If this setting is enabled, only export user-uploaded JATS files and
-        // do not generate our own JATS.
-        $jatsImportedOnly = $this->jatsImportedOnly($context);
-
-        // Check if the JATS file was found and that it was not generated if the setting is enabled.
+        // Only uploaded JATS is exported for now: generated JATS has no usable body or media.
         if (
             !$document ||
             !$document->jatsContent ||
-            ($jatsImportedOnly && $document->isDefaultContent) ||
+            $document->isDefaultContent ||
             $document->loadingContentError
         ) {
             return ['plugins.importexport.pmc.export.failure.jatsFileNotFound'];
@@ -428,14 +424,6 @@ class PubmedCentralExportPlugin extends PubObjectsExportPlugin implements HasTas
         return array_merge(parent::getObjectAdditionalSettings(), [
             $this->getDepositStatusSettingName()
         ]);
-    }
-
-    /**
-     * Get the JATS import setting value.
-     */
-    public function jatsImportedOnly(Context $context): bool
-    {
-        return ($this->getSetting($context->getId(), 'jatsImported') == 1);
     }
 
     /**

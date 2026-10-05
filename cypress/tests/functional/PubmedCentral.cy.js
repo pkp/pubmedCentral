@@ -10,7 +10,7 @@
 
 describe('PubMed Central plugin tests', function () {
 
-	it('Configures the plugin, shows export tabs, and exports a valid zip', function() {
+	it('Configures the plugin, shows export tabs, and refuses to export generated JATS', function() {
 		cy.login('admin', 'admin', 'publicknowledge');
 
 		cy.get('nav').contains('Settings').click();
@@ -44,8 +44,7 @@ describe('PubMed Central plugin tests', function () {
 		// Verify the export tab is present once required settings are saved.
 		cy.get('a[href="#exportSubmissions-tab"]').should('exist');
 
-		// Drive the export via cy.request to avoid Cypress hanging on the
-		// streaming binary download.
+		// Submission 1 has no uploaded JATS, so the export redirects back with an error.
 		cy.getCsrfToken();
 		cy.get('@csrfToken').then((csrfToken) => {
 			cy.request({
@@ -63,15 +62,10 @@ describe('PubMed Central plugin tests', function () {
 					'export=1',
 				].join('&'),
 				timeout: 60000,
-				encoding: 'binary',
 				followRedirect: false,
 			}).then((response) => {
-				expect(response.status).to.eq(200);
-				expect(response.headers['content-type']).to.eq('application/zip');
-				expect(response.body).to.have.length.gt(0);
-				// All zip files start with 'PK' (ASCII for the local file
-				// header magic 0x50 0x4B).
-				expect(response.body.slice(0, 2)).to.eq('PK');
+				expect(response.status).to.eq(302);
+				expect(response.headers['content-type']).to.not.eq('application/zip');
 			});
 		});
 	});

@@ -306,34 +306,6 @@ class PubmedCentralExportPluginTest extends PKPTestCase
     }
 
     //
-    // jatsImportedOnly()
-    //
-
-    /**
-     * The setting is stored with type 'bool', but a loose comparison against 1 is
-     * what decides whether generated JATS is allowed as a fallback.
-     *
-     * @param mixed $setting The stored setting value
-     */
-    #[DataProvider('jatsImportedProvider')]
-    public function testJatsImportedOnly(mixed $setting, bool $expected): void
-    {
-        $plugin = $this->createPlugin(['jatsImported' => $setting]);
-
-        $this->assertSame($expected, $plugin->jatsImportedOnly($this->createJournal()));
-    }
-
-    public static function jatsImportedProvider(): array
-    {
-        return [
-            'enabled' => [true, true],
-            'stored as a legacy string' => ['1', true],
-            'disabled' => [false, false],
-            'never saved' => [null, false],
-        ];
-    }
-
-    //
     // getExportActions()
     //
     public function testDepositActionOfferedWhenCredentialsAreComplete(): void

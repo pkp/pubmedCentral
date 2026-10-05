@@ -28,7 +28,7 @@ NLM Title Abbreviation.
 
 Articles to export to PubMed Central should meet the following requirements:
 
-- Have a valid JATS XML file in OJS, or generate valid JATS (1.2) in OJS via the JATS Template plugin.
+- Have a valid JATS XML file uploaded to the publication. OJS-generated JATS is not exported.
 - Contain high-resolution image files, if applicable.
 - Contain all required metadata (see below).
 
@@ -142,7 +142,8 @@ version other than 1.2 skips DTD validation, with a warning, and is style checke
 
 ## Uploaded JATS XML
 
-If a publication has an uploaded JATS XML file, then that will be exported in the plugin instead of the OJS-generated JATS.
+Only publications with an uploaded JATS XML file can be exported. OJS-generated JATS has no usable body or media
+files, so a publication without an uploaded file fails to export.
 
 ## Troubleshooting
 
