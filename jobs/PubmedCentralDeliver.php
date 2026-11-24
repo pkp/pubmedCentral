@@ -97,6 +97,9 @@ class PubmedCentralDeliver extends BaseJob
         } finally {
             $plugin->deleteTempFile($package['path']);
         }
+
+        // Outside the try, so that failing to record a delivery does not deliver it again
+        $plugin->recordDelivery($object, $package['revision']);
     }
 
     /**

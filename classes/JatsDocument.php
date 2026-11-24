@@ -727,8 +727,9 @@ class JatsDocument
             // is still packaged once
             if (!isset($packagedNames[$path])) {
                 $type = self::MEDIA_ELEMENT_TYPES[$node->nodeName];
+                // Numbered from 0 in four digits (e.g. "-g0000"), to match packages other platforms delivered
+                $sequence = str_pad((string) ($counts[$type] ?? 0), 4, '0', STR_PAD_LEFT);
                 $counts[$type] = ($counts[$type] ?? 0) + 1;
-                $sequence = str_pad((string) $counts[$type], 3, '0', STR_PAD_LEFT);
                 $extension = strtolower(pathinfo($path, PATHINFO_EXTENSION));
                 $packagedNames[$path] = $this->mediaBaseName . '-' . $type . $sequence . '.' . $extension;
                 $this->packagedMedia[$packagedNames[$path]] = $path;

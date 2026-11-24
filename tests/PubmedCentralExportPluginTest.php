@@ -15,6 +15,7 @@ namespace APP\plugins\generic\pubmedCentral\tests;
 use APP\issue\Issue;
 use APP\issue\Repository as IssueRepository;
 use APP\journal\Journal;
+use APP\plugins\generic\pubmedCentral\classes\ImportedHistory;
 use APP\plugins\generic\pubmedCentral\classes\JatsDocument;
 use APP\plugins\generic\pubmedCentral\PubmedCentralExportPlugin;
 use APP\plugins\PubObjectsExportPlugin;
@@ -151,8 +152,9 @@ class PubmedCentralExportPluginTest extends PKPTestCase
      * versions, in the order the collector would return them.
      *
      * @param array $datesPublished One publication date per version
+     * @param array $submissionData Data to set on the submission
      */
-    private function bindSubmissionRepository(array $datesPublished): void
+    private function bindSubmissionRepository(array $datesPublished, array $submissionData = []): void
     {
         $publications = [];
         foreach (array_values($datesPublished) as $index => $datePublished) {
@@ -164,7 +166,7 @@ class PubmedCentralExportPluginTest extends PKPTestCase
         }
 
         $submission = new Submission();
-        $submission->setData('publications', collect($publications));
+        $submission->setAllData($submissionData + ['publications' => collect($publications)]);
 
         $submissionRepository = $this->createMock(SubmissionRepository::class);
         $submissionRepository->method('get')->willReturn($submission);
@@ -830,8 +832,13 @@ class PubmedCentralExportPluginTest extends PKPTestCase
      *
      * @return array [plugin, package]
      */
-    private function packageWithMedia(array $mediaFiles, array $mediaPaths, string $body): array
-    {
+    private function packageWithMedia(
+        array $mediaFiles,
+        array $mediaPaths,
+        string $body,
+        array $publicationData = [],
+        array $submissionData = []
+    ): array {
         $plugin = $this->createPlugin(['nlmTitle' => 'J Test', 'namingType' => 'articleNumber']);
 
         $submissionFileRepository = $this->bindMediaFiles(
@@ -864,7 +871,7 @@ class PubmedCentralExportPluginTest extends PKPTestCase
         DAORegistry::registerDAO('GenreDAO', $genreDao);
 
         // The collection year, which the package name is built from
-        $this->bindSubmissionRepository(['2025-03-01']);
+        $this->bindSubmissionRepository(['2025-03-01'], $submissionData);
 
         $galley = new Galley();
         $galley->setData('locale', 'en');
@@ -876,6 +883,9 @@ class PubmedCentralExportPluginTest extends PKPTestCase
         $publication->setData('locale', 'en');
         $publication->setData('articleNumber', 'e12345');
         $publication->setData('galleys', [$galley]);
+        foreach ($publicationData as $name => $value) {
+            $publication->setData($name, $value);
+        }
 
         // Validation is exercised by the validateJats() tests; running the style checker
         // here would only make the packaging slow to test
@@ -915,12 +925,65 @@ class PubmedCentralExportPluginTest extends PKPTestCase
         sort($names);
 
         $this->assertSame([
-            'jtest-2025-e12345-g001.tif',
+            'jtest-2025-e12345-g0000.tif',
             'jtest-2025-e12345.pdf',
             'jtest-2025-e12345.xml',
         ], $names);
 
         unlink($package['path']);
+    }
+
+    /**
+     * A correction to a version indexed in PMC keeps the names its files were first delivered
+     * under, and its package continues the article's established names as the next revision.
+     */
+    public function testCreateZipNamesARevisionFromItsDeliveredNames(): void
+    {
+        [, $package] = $this->packageWithMedia(
+            [$this->createMediaFile(1, 11, 'figure1.tif')],
+            [11 => 'journals/1/figure1.tif'],
+            '<fig id="f1"><graphic xlink:href="figure1.tif"/></fig>',
+            [
+                ImportedHistory::SETTING_VERSION => '2',
+                ImportedHistory::SETTING_REVISION => '1',
+                ImportedHistory::SETTING_FILE_STEM => 'openreseurope-4-27633',
+            ],
+            [ImportedHistory::SETTING_PACKAGE_PREFIX => 'openreseurope-4-openreseurope.4-83']
+        );
+
+        $this->assertArrayNotHasKey('error', $package);
+        $this->assertSame('openreseurope-4-openreseurope.4-83.v2.r2', $package['filename']);
+        $this->assertSame(2, $package['revision']);
+
+        $zip = new ZipArchive();
+        $zip->open($package['path']);
+        $names = [];
+        for ($i = 0; $i < $zip->numFiles; $i++) {
+            $names[] = $zip->getNameIndex($i);
+        }
+        $zip->close();
+        sort($names);
+
+        $this->assertSame([
+            'openreseurope-4-27633-g0000.tif',
+            'openreseurope-4-27633.pdf',
+            'openreseurope-4-27633.xml',
+        ], $names);
+
+        unlink($package['path']);
+    }
+
+    /**
+     * A version another platform delivered cannot be corrected without the names it was delivered under.
+     */
+    public function testCreateZipRefusesAVersionWithAnIncompleteHistory(): void
+    {
+        [, $package] = $this->packageWithMedia([], [], '<p>Body</p>', [
+            ImportedHistory::SETTING_VERSION => '2',
+            ImportedHistory::SETTING_REVISION => '0',
+        ]);
+
+        $this->assertSame(['error' => ['plugins.importexport.pmc.export.failure.incompleteHistory']], $package);
     }
 
     //
@@ -1576,27 +1639,27 @@ class PubmedCentralExportPluginTest extends PKPTestCase
         $xpath = $this->xpath($result);
 
         $this->assertSame(
-            'jtest-2025-82-i001.tif',
+            'jtest-2025-82-i0000.tif',
             $xpath->evaluate('string(//inline-graphic/@xlink:href)')
         );
         $this->assertSame(
-            'jtest-2025-82-g001.tif',
+            'jtest-2025-82-g0000.tif',
             $xpath->evaluate('string(//fig[@id="f1"]/graphic/@xlink:href)')
         );
         $this->assertSame(
-            'jtest-2025-82-g002.tif',
+            'jtest-2025-82-g0001.tif',
             $xpath->evaluate('string(//fig[@id="f2"]/graphic/@xlink:href)')
         );
         $this->assertSame(
-            'jtest-2025-82-s001.csv',
+            'jtest-2025-82-s0000.csv',
             $xpath->evaluate('string(//supplementary-material/@xlink:href)')
         );
 
         $this->assertSame([
-            'jtest-2025-82-i001.tif' => 'journals/1/logo-hi.tif',
-            'jtest-2025-82-g001.tif' => 'journals/1/figure1-hi.tif',
-            'jtest-2025-82-g002.tif' => 'journals/1/figure2-hi.tif',
-            'jtest-2025-82-s001.csv' => 'journals/1/dataset.csv',
+            'jtest-2025-82-i0000.tif' => 'journals/1/logo-hi.tif',
+            'jtest-2025-82-g0000.tif' => 'journals/1/figure1-hi.tif',
+            'jtest-2025-82-g0001.tif' => 'journals/1/figure2-hi.tif',
+            'jtest-2025-82-s0000.csv' => 'journals/1/dataset.csv',
         ], $packaged);
     }
 
@@ -1617,13 +1680,13 @@ class PubmedCentralExportPluginTest extends PKPTestCase
 
         $xpath = $this->xpath($result);
         $this->assertSame(
-            ['jtest-2025-82-g001.jpg', 'jtest-2025-82-g001.jpg'],
+            ['jtest-2025-82-g0000.jpg', 'jtest-2025-82-g0000.jpg'],
             array_map(
                 fn ($node) => $node->getAttribute('xlink:href'),
                 iterator_to_array($xpath->query('//graphic'))
             )
         );
-        $this->assertSame(['jtest-2025-82-g001.jpg' => 'journals/1/figure1.jpg'], $packaged);
+        $this->assertSame(['jtest-2025-82-g0000.jpg' => 'journals/1/figure1.jpg'], $packaged);
     }
 
     /**
@@ -1682,10 +1745,10 @@ class PubmedCentralExportPluginTest extends PKPTestCase
 
         $this->assertIsString($result);
         $this->assertSame(
-            'jtest-2025-82-g001.jpg',
+            'jtest-2025-82-g0000.jpg',
             $this->xpath($result)->evaluate('string(//graphic/@xlink:href)')
         );
-        $this->assertSame(['jtest-2025-82-g001.jpg' => 'journals/1/figure1.jpg'], $packaged);
+        $this->assertSame(['jtest-2025-82-g0000.jpg' => 'journals/1/figure1.jpg'], $packaged);
     }
 
     /**
@@ -2357,16 +2420,16 @@ class PubmedCentralExportPluginTest extends PKPTestCase
         $xpath = $this->xpath($result);
 
         $this->assertSame(
-            'jtest-2025-82-i001.tif',
+            'jtest-2025-82-i0000.tif',
             $xpath->evaluate('string(//inline-graphic/@xlink:href)')
         );
         $this->assertSame(
-            'jtest-2025-82-g001.tif',
+            'jtest-2025-82-g0000.tif',
             $xpath->evaluate('string(//fig[@id="f1"]/graphic/@xlink:href)')
         );
         $this->assertSame([
-            'jtest-2025-82-i001.tif' => 'journals/1/logo-hi.tif',
-            'jtest-2025-82-g001.tif' => 'journals/1/figure1-hi.tif',
+            'jtest-2025-82-i0000.tif' => 'journals/1/logo-hi.tif',
+            'jtest-2025-82-g0000.tif' => 'journals/1/figure1-hi.tif',
         ], $packaged);
     }
 
@@ -2398,10 +2461,10 @@ class PubmedCentralExportPluginTest extends PKPTestCase
 
         $this->assertIsString($result);
         $this->assertSame(
-            'jtest-2025-82-s001.csv',
+            'jtest-2025-82-s0000.csv',
             $this->xpath($result)->evaluate('string(//supplementary-material/@xlink:href)')
         );
-        $this->assertSame(['jtest-2025-82-s001.csv' => 'journals/1/dataset.csv'], $packaged);
+        $this->assertSame(['jtest-2025-82-s0000.csv' => 'journals/1/dataset.csv'], $packaged);
     }
 
     /**
@@ -2547,6 +2610,270 @@ class PubmedCentralExportPluginTest extends PKPTestCase
         $this->assertSame(
             ['plugins.importexport.pmc.export.failure.jatsNodeMissing', 'journal-meta'],
             $this->prepareJats($jats, 'jtest.pdf')
+        );
+    }
+
+    //
+    // Delivery history
+    //
+
+    /**
+     * Build the plugin with the article's submission and the settings it saves stubbed
+     * out, recording each save in $saved.
+     */
+    private function createDeliveryPlugin(?Submission $submission, array &$saved = []): PubmedCentralExportPlugin
+    {
+        $plugin = $this->getMockBuilder(PubmedCentralExportPlugin::class)
+            ->disableOriginalConstructor()
+            ->onlyMethods(['getSetting', 'getPluginPath', 'submissionOf', 'updateObject'])
+            ->getMock();
+
+        $settings = ['nlmTitle' => 'J Test', 'namingType' => 'articleNumber'];
+        $plugin->method('getSetting')->willReturnCallback(fn ($contextId, $name) => $settings[$name] ?? null);
+        $plugin->method('getPluginPath')->willReturn('plugins/generic/pubmedCentral');
+        $plugin->method('submissionOf')->willReturn($submission);
+        $plugin->method('updateObject')->willReturnCallback(
+            function ($object, $params) use (&$saved) {
+                $saved[] = [$object, $params];
+            }
+        );
+
+        return $plugin;
+    }
+
+    /**
+     * @param array $data Data to set on the publication
+     */
+    private function createVersion(int $id, int $versionMajor, array $data = [], int $versionMinor = 0): Publication
+    {
+        $publication = new Publication();
+        $publication->setId($id);
+        $publication->setData('submissionId', 5);
+        $publication->setData('issueId', 7);
+        $publication->setData('articleNumber', 'e12345');
+        $publication->setData('versionStage', VersionStage::VERSION_OF_RECORD->value);
+        $publication->setData('versionMajor', $versionMajor);
+        $publication->setData('versionMinor', $versionMinor);
+        foreach ($data as $name => $value) {
+            $publication->setData($name, $value);
+        }
+        return $publication;
+    }
+
+    /**
+     * @param Publication[] $publications
+     */
+    private function createArticle(array $publications, array $data = []): Submission
+    {
+        $submission = new Submission();
+        $submission->setId(5);
+        $submission->setAllData($data + ['id' => 5, 'publications' => collect($publications)]);
+        return $submission;
+    }
+
+    private const PREFIX = 'openreseurope-4-openreseurope.4-83';
+
+    /**
+     * An article no other platform delivered is named from its metadata and numbered by its
+     * major versions, as before, and a timestamp rather than a revision tells its deliveries apart.
+     */
+    public function testPackageNamesNameANewArticleFromItsMetadata(): void
+    {
+        $this->bindIssueRepository(12, 3, '2025-03-01');
+        $publication = $this->createVersion(3, 2, ['pubmedCentral::status' => PubObjectsExportPlugin::EXPORT_STATUS_REGISTERED]);
+        $plugin = $this->createDeliveryPlugin($this->createArticle([$publication]));
+
+        $names = $plugin->packageNames($publication, $this->createJournal());
+
+        $this->assertMatchesRegularExpression('/^jtest-2025-e12345\.v2-\d{14}$/', $names['package']);
+        $this->assertSame('jtest-2025-e12345.v2', $names['stem']);
+        $this->assertNull($names['revision']);
+    }
+
+    /**
+     * Where another platform also numbered versions that are not here, an imported version
+     * keeps its number and stem, and a new version is offset from its major version to
+     * continue after the highest indexed in PMC, under the article's established names.
+     */
+    public function testPackageNamesContinueAnArticleAnotherPlatformDelivered(): void
+    {
+        $imported = $this->createVersion(2, 2, [
+            ImportedHistory::SETTING_VERSION => '4',
+            ImportedHistory::SETTING_REVISION => '0',
+            ImportedHistory::SETTING_FILE_STEM => 'openreseurope-4-27633',
+        ]);
+        $v3 = $this->createVersion(3, 3);
+        $v4 = $this->createVersion(4, 4);
+        $plugin = $this->createDeliveryPlugin($this->createArticle([$imported, $v3, $v4], [
+            ImportedHistory::SETTING_PACKAGE_PREFIX => self::PREFIX,
+            ImportedHistory::SETTING_LAST_VERSION => '5',
+        ]));
+        $journal = $this->createJournal();
+
+        $names = $plugin->packageNames($imported, $journal);
+        $this->assertSame(self::PREFIX . '.v4.r1', $names['package']);
+        $this->assertSame('openreseurope-4-27633', $names['stem']);
+        $this->assertSame(1, $names['revision']);
+
+        $names = $plugin->packageNames($v3, $journal);
+        $this->assertSame(self::PREFIX . '.v6', $names['package']);
+        $this->assertSame(self::PREFIX . '.v6', $names['stem']);
+        $this->assertNull($names['revision']);
+
+        $this->assertSame(self::PREFIX . '.v7', $plugin->packageNames($v4, $journal)['package']);
+    }
+
+    /**
+     * The other platform numbered versions under review in the same series as versions of
+     * record, but OJS numbers them separately, so only versions of record set the offset.
+     */
+    public function testPackageNamesContinueAfterImportedVersionsUnderReview(): void
+    {
+        $underReview = [
+            'versionStage' => VersionStage::PUBLISHED_MANUSCRIPT_UNDER_REVIEW->value,
+            ImportedHistory::SETTING_REVISION => '0',
+        ];
+        $pmur1 = $this->createVersion(1, 1, $underReview + [ImportedHistory::SETTING_VERSION => '1']);
+        $pmur2 = $this->createVersion(2, 2, $underReview + [ImportedHistory::SETTING_VERSION => '2']);
+        $imported = $this->createVersion(3, 1, [
+            ImportedHistory::SETTING_VERSION => '3',
+            ImportedHistory::SETTING_REVISION => '0',
+            ImportedHistory::SETTING_FILE_STEM => 'openreseurope-4-27633',
+        ]);
+        $new = $this->createVersion(4, 2);
+        $plugin = $this->createDeliveryPlugin($this->createArticle([$pmur1, $pmur2, $imported, $new], [
+            ImportedHistory::SETTING_PACKAGE_PREFIX => self::PREFIX,
+            ImportedHistory::SETTING_LAST_VERSION => '3',
+        ]));
+
+        $this->assertSame(self::PREFIX . '.v4', $plugin->packageNames($new, $this->createJournal())['package']);
+    }
+
+    /**
+     * A minor version corrects the version it was made from, so its package is the next
+     * revision of that version, however many its siblings were delivered as.
+     */
+    public function testPackageNamesNameACorrectionAsTheNextRevision(): void
+    {
+        $original = $this->createVersion(2, 2, [ImportedHistory::SETTING_REVISION => '2']);
+        $correction = $this->createVersion(3, 2, [ImportedHistory::SETTING_REVISION => '0'], 1);
+        $plugin = $this->createDeliveryPlugin($this->createArticle([$original, $correction], [
+            ImportedHistory::SETTING_PACKAGE_PREFIX => self::PREFIX,
+        ]));
+
+        $names = $plugin->packageNames($correction, $this->createJournal());
+
+        $this->assertSame(self::PREFIX . '.v2.r3', $names['package']);
+        $this->assertSame(self::PREFIX . '.v2', $names['stem']);
+        $this->assertSame(3, $names['revision']);
+    }
+
+    /**
+     * A minor version made before its version was first delivered was not given the
+     * record of that delivery, but still corrects that version.
+     */
+    public function testPackageNamesNameACorrectionMadeBeforeItsVersionWasDelivered(): void
+    {
+        $original = $this->createVersion(2, 2, [ImportedHistory::SETTING_REVISION => '0']);
+        $correction = $this->createVersion(3, 2, [], 1);
+        $plugin = $this->createDeliveryPlugin($this->createArticle([$original, $correction], [
+            ImportedHistory::SETTING_PACKAGE_PREFIX => self::PREFIX,
+        ]));
+
+        $this->assertSame(self::PREFIX . '.v2.r1', $plugin->packageNames($correction, $this->createJournal())['package']);
+    }
+
+    /**
+     * A version delivered without its revision being recorded, such as one marked
+     * registered, is named as a revision wherever its package is built.
+     */
+    public function testPackageNamesNameAVersionMarkedRegisteredAsARevision(): void
+    {
+        $publication = $this->createVersion(3, 2, ['pubmedCentral::status' => PubObjectsExportPlugin::EXPORT_STATUS_MARKEDREGISTERED]);
+        $plugin = $this->createDeliveryPlugin($this->createArticle([$publication], [
+            ImportedHistory::SETTING_PACKAGE_PREFIX => self::PREFIX,
+        ]));
+
+        $this->assertSame(self::PREFIX . '.v2.r1', $plugin->packageNames($publication, $this->createJournal())['package']);
+    }
+
+    public function testPrepareDeliveryRecordsADeliveryOnlyItsStatusShows(): void
+    {
+        $publication = $this->createVersion(3, 1, ['pubmedCentral::status' => PubObjectsExportPlugin::EXPORT_STATUS_STALE]);
+        $saved = [];
+        $plugin = $this->createDeliveryPlugin($this->createArticle([$publication], [
+            ImportedHistory::SETTING_PACKAGE_PREFIX => self::PREFIX,
+        ]), $saved);
+
+        $plugin->prepareDelivery($publication);
+
+        $this->assertSame([[$publication, [ImportedHistory::SETTING_REVISION => '0']]], $saved);
+    }
+
+    public function testRecordDeliveryRecordsTheRevisionDelivered(): void
+    {
+        $publication = $this->createVersion(3, 2);
+        $saved = [];
+        $plugin = $this->createDeliveryPlugin($this->createArticle([$publication], [
+            ImportedHistory::SETTING_PACKAGE_PREFIX => self::PREFIX,
+        ]), $saved);
+
+        $plugin->recordDelivery($publication, null);
+        $plugin->recordDelivery($publication, 2);
+
+        $this->assertSame([
+            [$publication, [ImportedHistory::SETTING_REVISION => '0']],
+            [$publication, [ImportedHistory::SETTING_REVISION => '2']],
+        ], $saved);
+    }
+
+    /**
+     * An article named from its metadata counts no revisions, so nothing is recorded of its deliveries.
+     */
+    public function testDeliveriesOfANewArticleAreNotRecorded(): void
+    {
+        $publication = $this->createVersion(3, 1, ['pubmedCentral::status' => PubObjectsExportPlugin::EXPORT_STATUS_STALE]);
+        $saved = [];
+        $plugin = $this->createDeliveryPlugin($this->createArticle([$publication]), $saved);
+
+        $plugin->prepareDelivery($publication);
+        $plugin->recordDelivery($publication, null);
+
+        $this->assertSame([], $saved);
+    }
+
+    public static function historyProvider(): array
+    {
+        $complete = [
+            ImportedHistory::SETTING_VERSION => '2',
+            ImportedHistory::SETTING_REVISION => '0',
+            ImportedHistory::SETTING_FILE_STEM => 'openreseurope-4-27633',
+        ];
+
+        return [
+            'not imported' => [[ImportedHistory::SETTING_REVISION => '0'], false],
+            'complete' => [$complete, false],
+            'no stem' => [array_diff_key($complete, [ImportedHistory::SETTING_FILE_STEM => null]), true],
+            'no revision' => [array_diff_key($complete, [ImportedHistory::SETTING_REVISION => null]), true],
+        ];
+    }
+
+    #[DataProvider('historyProvider')]
+    public function testHasIncompleteHistory(array $data, bool $incomplete): void
+    {
+        $this->assertSame($incomplete, ImportedHistory::isIncomplete($this->createVersion(3, 2, $data)));
+    }
+
+    public function testBuildFileNameCarriesAGivenVersion(): void
+    {
+        $plugin = $this->createPlugin(['namingType' => 'articleNumber']);
+        $this->bindIssueRepository(12, 3, '2025-03-01');
+
+        $this->assertSame(
+            'jtest-2025-e12345.v5.zip',
+            $this->invoke($plugin, 'buildFileName', [
+                'J Test', $this->createJournal(), $this->createVersion(3, 2), false, 'zip', 5,
+            ])
         );
     }
 

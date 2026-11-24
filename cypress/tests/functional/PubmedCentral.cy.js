@@ -8,6 +8,12 @@
  * @brief Functional tests for the PubMed Central plugin.
  */
 
+// Unlike cy.waitJQuery(), retries until the page has loaded jQuery, rather than failing
+// on a page that is still loading
+function waitForAjax() {
+	cy.window({timeout: 20000}).its('jQuery.active', {timeout: 20000}).should('eq', 0);
+}
+
 describe('PubMed Central plugin tests', function () {
 
 	it('Configures the plugin, shows export tabs, and refuses to export generated JATS', function() {
@@ -21,25 +27,23 @@ describe('PubMed Central plugin tests', function () {
 		cy.get('input[id^="select-cell-pubmedcentralplugin-enabled"]').check();
 		cy.get('input[id^="select-cell-pubmedcentralplugin-enabled"]').should('be.checked');
 		cy.contains(/The plugin "PubMed Central Plugin" has been enabled\./i, {timeout: 20000});
-		cy.reload();
 
 		// Open import/export plugin page.
-		cy.get('nav').contains('Tools').click();
-		cy.contains(/PubMed Central Export Plugin/i, {timeout: 20000}).click();
+		cy.visit('/index.php/publicknowledge/en/management/importexport/plugin/PubmedCentralExportPlugin');
 
 		// Configure the only required setting; SFTP fields aren't exercised
 		// by the export action (they're only used by the deposit flow).
-		cy.waitJQuery({timeout: 20000});
 		cy.get('form#pmcSettingsForm', {timeout: 20000}).should('be.visible');
+		waitForAjax();
 		cy.get('input[id^="nlmTitle"]').clear().type('J Public Knowledge', {delay: 0});
 		cy.get('form#pmcSettingsForm button:contains("Save")').click();
 		cy.contains('Your changes have been saved.');
-		cy.waitJQuery({timeout: 20000});
+		waitForAjax();
 
 		// Reload so the page re-evaluates configurationErrors with the saved
 		// settings and renders the export tab.
 		cy.reload();
-		cy.waitJQuery({timeout: 20000});
+		waitForAjax();
 
 		// Verify the export tab is present once required settings are saved.
 		cy.get('a[href="#exportSubmissions-tab"]').should('exist');

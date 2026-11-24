@@ -17,7 +17,9 @@ namespace APP\plugins\generic\pubmedCentral;
 use APP\core\Application;
 use APP\facades\Repo;
 use APP\notification\NotificationManager;
+use APP\plugins\generic\pubmedCentral\classes\DeliveryHistoryImporter;
 use APP\plugins\generic\pubmedCentral\classes\form\PubmedCentralSettingsForm;
+use APP\plugins\generic\pubmedCentral\classes\ImportedHistory;
 use APP\plugins\generic\pubmedCentral\classes\JatsDocument;
 use APP\plugins\generic\pubmedCentral\jobs\PubmedCentralDeliver;
 use APP\plugins\PubObjectsExportPlugin;
@@ -94,27 +96,29 @@ class PubmedCentralExportPlugin extends PubObjectsExportPlugin implements HasTas
      *  - volumeIssue: nlmTitle-volume-issue-firstPage(.vVersion)(-timestamp)
      *  - articleNumber: nlmTitle-collectionYear-articleNumber(.vVersion)(-timestamp)
      *
-     * PMC organizes its archive by volume, so where a journal publishes by article
-     * number and carries no volumes, the collection year takes the volume's place. The
+     * PMC organizes its archive by volume, so if a journal publishes by article
+     * number and does not use volumes, the collection year takes the volume's place. The
      * article number or first page is PMC's "uid", the last part before any timestamp.
      *
      * The version identifies which version of an article a package holds, and separates
      * one version's files from another's: every name here is derived from the publication,
      * so without it two versions of the same article produce the same package name and the
      * same names inside it. It sits inside the uid rather than beside it, because PMC reads
-     * the uid as a single part. A publication carrying no version number is named as before.
+     * the uid as a single part. A publication with no version number is named as before.
      *
      * @see https://pmc.ncbi.nlm.nih.gov/pub/filespec-delivery/
      *
      * @param bool $ts Whether to include a timestamp in the filename.
      * @param string|null $fileExtension The optional file extension to include in the filename.
+     * @param int|null $version The version number PMC indexes the publication under, if not its major version.
      */
     protected function buildFileName(
         string $nlmTitle,
         Context $context,
         Submission|Publication|null $object = null,
         bool $ts = false,
-        ?string $fileExtension = null
+        ?string $fileExtension = null,
+        ?int $version = null
     ): string {
         $publication = $object instanceof Submission ? $object->getCurrentPublication() : $object;
         $parts = [$nlmTitle];
@@ -133,7 +137,8 @@ class PubmedCentralExportPlugin extends PubObjectsExportPlugin implements HasTas
 
             // PMC reads the uid as a single part of the name (jour-vol-uid-timestamp), so an
             // article's version belongs inside it rather than beside it: "82.v2", not "82-v2".
-            if ($uid !== '' && ($version = $publication->getData('versionMajor'))) {
+            $version ??= (int) $publication->getData('versionMajor') ?: null;
+            if ($uid !== '' && $version) {
                 $uid .= '.v' . $version;
             }
             $parts[] = $uid;
@@ -186,6 +191,145 @@ class PubmedCentralExportPlugin extends PubObjectsExportPlugin implements HasTas
         $timestamp = $datePublished ? strtotime($datePublished) : false;
 
         return $timestamp ? date('Y', $timestamp) : null;
+    }
+
+    /**
+     * The names a publication is delivered to PMC under: the package, the stem every file
+     * inside it is named from, and the revision of its version it is.
+     *
+     * An article another platform delivered continues the names it established, without
+     * the timestamp it never used, so a package correcting a version indexed in PMC is
+     * named as its next revision (".v2.r1"), as PMC asks. Any other article is named from
+     * its metadata, and its timestamp tells one delivery of a version from the next.
+     *
+     * @return array{package: string, stem: string, revision: ?int}
+     */
+    public function packageNames(Submission|Publication $object, Context $context, ?Submission $submission = null): array
+    {
+        $publication = $object instanceof Submission ? $object->getCurrentPublication() : $object;
+        $submission ??= $object instanceof Submission ? $object : $this->submissionOf($publication);
+        $version = $this->pmcVersion($publication, $submission);
+
+        if (!$prefix = ImportedHistory::packagePrefix($submission)) {
+            $nlmTitle = $this->nlmTitle($context);
+            return [
+                'package' => $this->buildFileName($nlmTitle, $context, $object, true, null, $version),
+                'stem' => $this->buildFileName($nlmTitle, $context, $object, false, null, $version),
+                'revision' => null,
+            ];
+        }
+
+        $name = $prefix . ($version ? '.v' . $version : '');
+        $revision = $this->nextRevision($publication, $submission);
+        return [
+            'package' => $name . ($revision ? '.r' . $revision : ''),
+            'stem' => ImportedHistory::fileStem($publication) ?? $name,
+            'revision' => $revision,
+        ];
+    }
+
+    /**
+     * The version number a publication is, or will be, indexed under in PMC: its major version.
+     *
+     * With an imported history, an imported version keeps the number the other platform
+     * delivered it as, and a new version is offset from its major version by as many
+     * versions as PMC indexes beyond the imported ones (see ImportedHistory::versionOffset).
+     */
+    protected function pmcVersion(Publication $publication, ?Submission $submission): ?int
+    {
+        if ($version = ImportedHistory::version($publication)) {
+            return $version;
+        }
+
+        $versionMajor = (int) $publication->getData('versionMajor');
+        return $versionMajor ? $versionMajor + ImportedHistory::versionOffset($submission) : null;
+    }
+
+    /**
+     * The revision a package of this publication is delivered as: none for a version
+     * not yet indexed in PMC, and otherwise one past the highest delivered of that
+     * version by any of its publications, since a minor version corrects the version
+     * it was made from.
+     *
+     * For articles with imported history only.
+     */
+    protected function nextRevision(Publication $publication, ?Submission $submission): ?int
+    {
+        $version = $this->pmcVersion($publication, $submission);
+        $revisions = [];
+        foreach ([$publication, ...($submission?->getData('publications') ?? [])] as $candidate) { /** @var Publication $candidate */
+            $revision = $this->deliveredRevision($candidate);
+            if ($revision !== null && $this->pmcVersion($candidate, $submission) === $version) {
+                $revisions[] = $revision;
+            }
+        }
+
+        return $revisions ? max($revisions) + 1 : null;
+    }
+
+    /**
+     * The highest revision delivered of a publication, if it has been delivered. One
+     * delivered without the revision being recorded, such as one marked registered, is
+     * recognized by its deposit status, and was its version's first package.
+     *
+     * For articles with imported history only.
+     */
+    protected function deliveredRevision(Publication $publication): ?int
+    {
+        if (($publication->getData(ImportedHistory::SETTING_REVISION) ?? '') !== '') {
+            return (int) $publication->getData(ImportedHistory::SETTING_REVISION);
+        }
+
+        return in_array($publication->getData($this->getDepositStatusSettingName()), [
+            PubObjectsExportPlugin::EXPORT_STATUS_REGISTERED,
+            PubObjectsExportPlugin::EXPORT_STATUS_MARKEDREGISTERED,
+            PubObjectsExportPlugin::EXPORT_STATUS_STALE,
+        ]) ? 0 : null;
+    }
+
+    /**
+     * Before a publication's delivery is queued, record a delivery only its deposit status
+     * shows, which a failed delivery would replace.
+     *
+     * For articles with imported history only.
+     */
+    public function prepareDelivery(Submission|Publication $object): void
+    {
+        if (
+            $this->continuesHistory($object) &&
+            ($object->getData(ImportedHistory::SETTING_REVISION) ?? '') === '' &&
+            $this->deliveredRevision($object) === 0
+        ) {
+            $this->updateObject($object, [ImportedHistory::SETTING_REVISION => '0']);
+        }
+    }
+
+    /**
+     * Record the revision a package was delivered as, so that the next package of the
+     * same version is named as the one after it.
+     *
+     * For articles with imported history only.
+     */
+    public function recordDelivery(Submission|Publication $object, ?int $revision): void
+    {
+        if ($this->continuesHistory($object)) {
+            $this->updateObject($object, [ImportedHistory::SETTING_REVISION => (string) ($revision ?? 0)]);
+        }
+    }
+
+    /**
+     * Whether a publication's packages continue the names of an imported history, the only
+     * names that count revisions.
+     */
+    protected function continuesHistory(Submission|Publication $object): bool
+    {
+        return $object instanceof Publication && ImportedHistory::packagePrefix($this->submissionOf($object)) !== null;
+    }
+
+    protected function submissionOf(Publication $publication): ?Submission
+    {
+        $submissionId = (int) $publication->getData('submissionId');
+        return $submissionId ? Repo::submission()->get($submissionId) : null;
     }
 
     /**
@@ -296,7 +440,7 @@ class PubmedCentralExportPlugin extends PubObjectsExportPlugin implements HasTas
                 $filename = $this->buildFileName($nlmTitle, $context, null, true, 'zip');
                 if (count($objects) == 1) {
                     $object = array_shift($objects);
-                    $filename = $this->buildFileName($nlmTitle, $context, $object, true, 'zip');
+                    $filename = $this->packageNames($object, $context)['package'] . '.zip';
                 }
                 $fileManager = new FileManager();
                 $fileManager->downloadByPath(
@@ -337,7 +481,8 @@ class PubmedCentralExportPlugin extends PubObjectsExportPlugin implements HasTas
         &$outputErrors = null,
         ?string $articlePdfFilename = null,
         $genres = null,
-        ?string $nlmTitle = null
+        ?string $nlmTitle = null,
+        ?string $fileStem = null
     ): array|string {
         // PMC requires a PDF corresponding to each article XML file, so a package
         // without one is never valid. See https://pmc.ncbi.nlm.nih.gov/pub/filespec/
@@ -387,7 +532,7 @@ class PubmedCentralExportPlugin extends PubObjectsExportPlugin implements HasTas
             $xml,
             $articlePdfFilename,
             $this->getMediaFiles($publication),
-            $this->buildFileName($nlmTitle, $context, $object)
+            $fileStem ?? $this->packageNames($object, $context)['stem']
         );
         $returnXml = $jatsDocument->prepare($nlmTitle, $this->collectionYear($object));
         $this->packagedMedia = $jatsDocument->getPackagedMedia();
@@ -422,7 +567,8 @@ class PubmedCentralExportPlugin extends PubObjectsExportPlugin implements HasTas
     public function getObjectAdditionalSettings(): array
     {
         return array_merge(parent::getObjectAdditionalSettings(), [
-            $this->getDepositStatusSettingName()
+            $this->getDepositStatusSettingName(),
+            ...ImportedHistory::SETTINGS,
         ]);
     }
 
@@ -488,6 +634,7 @@ class PubmedCentralExportPlugin extends PubObjectsExportPlugin implements HasTas
         }
 
         foreach ($objects as $object) {
+            $this->prepareDelivery($object);
             dispatch(new PubmedCentralDeliver(
                 $object->getId(),
                 $object instanceof Publication,
@@ -541,19 +688,27 @@ class PubmedCentralExportPlugin extends PubObjectsExportPlugin implements HasTas
      */
     public function createZip(Submission|Publication $object, Context $context, ?bool $noValidation = null): array
     {
-        $zipDetails = [];
         $fileService = app()->get('file');
         $nlmTitle = $this->nlmTitle($context);
         $genreDao = DAORegistry::getDAO('GenreDAO'); /** @var GenreDAO $genreDao */
         $genres = $genreDao->getEnabledByContextId($context->getId());
 
         $publication = $object instanceof Submission ? $object->getCurrentPublication() : $object;
+        $submission = $object instanceof Submission ? $object : $this->submissionOf($publication);
         $locale = $object->getData('locale');
 
+        if (ImportedHistory::isIncomplete($publication)) {
+            return ['error' => ['plugins.importexport.pmc.export.failure.incompleteHistory']];
+        }
+
         // Ensure the metadata required by the configured naming type is present
-        if ($metadataError = $this->validateNamingMetadata($publication, $context)) {
+        if (
+            !ImportedHistory::packagePrefix($submission) &&
+            ($metadataError = $this->validateNamingMetadata($publication, $context))
+        ) {
             return ['error' => $metadataError];
         }
+        $names = $this->packageNames($object, $context, $submission);
 
         $zipPath = tempnam(sys_get_temp_dir(), 'PubmedCentralExport_');
         $zip = new ZipArchive();
@@ -599,7 +754,7 @@ class PubmedCentralExportPlugin extends PubObjectsExportPlugin implements HasTas
 
             $galleyPath = $fileService->get($galleyFile->getData('fileId'))->path;
             $extension = pathinfo($galleyPath, PATHINFO_EXTENSION);
-            $galleyFilename = $this->buildFileName($nlmTitle, $context, $object, false, $extension);
+            $galleyFilename = $names['stem'] . '.' . strtolower($extension);
             $galleyFilePath = $galleyFilename;
             $articlePdfFilename = $galleyFilename;
 
@@ -637,12 +792,13 @@ class PubmedCentralExportPlugin extends PubObjectsExportPlugin implements HasTas
             $exportErrors,
             $articlePdfFilename,
             $genres,
-            $nlmTitle
+            $nlmTitle,
+            $names['stem']
         );
         if (is_array($document)) {
             return $this->discardZip($zip, $zipPath, $document);
         } else {
-            $articlePathName = $this->buildFileName($nlmTitle, $context, $object, false, 'xml');
+            $articlePathName = $names['stem'] . '.xml';
             if (!$zip->addFromString($articlePathName, $document)) {
                 return $this->discardZip(
                     $zip,
@@ -660,7 +816,8 @@ class PubmedCentralExportPlugin extends PubObjectsExportPlugin implements HasTas
                 }
             }
 
-            $zipDetails['filename'] = $this->buildFileName($nlmTitle, $context, $object, true);
+            $zipDetails = $names;
+            $zipDetails['filename'] = $names['package'];
             $zipDetails['path'] = $zipPath;
             $zip->close();
         }
@@ -788,9 +945,61 @@ class PubmedCentralExportPlugin extends PubObjectsExportPlugin implements HasTas
 
     /**
      * @copydoc ImportExportPlugin::executeCLI()
+     *
+     * Imports the history of articles indexed in PMC that another platform delivered.
+     *
+     * @see DeliveryHistoryImporter
      */
     public function executeCLI($scriptName, &$args)
     {
+        $command = array_shift($args);
+        $dryRun = in_array('--dry-run', $args);
+        [$contextPath, $file] = array_values(array_diff($args, ['--dry-run'])) + [null, null];
+
+        if ($command !== 'importHistory' || !$contextPath || !$file) {
+            $this->usage($scriptName);
+            return;
+        }
+
+        $context = Application::getContextDAO()->getByPath($contextPath);
+        if (!$context) {
+            echo __('plugins.importexport.common.cliError') . "\n";
+            echo __('plugins.importexport.common.error.unknownContext', ['contextPath' => $contextPath]) . "\n";
+            return;
+        }
+
+        if ($this->isRelativePath($file)) {
+            $file = PWD . '/' . $file;
+        }
+        if (!is_readable($file)) {
+            echo __('plugins.importexport.common.cliError') . "\n";
+            echo __('plugins.importexport.pmc.cli.importHistory.fileNotReadable', ['file' => $file]) . "\n";
+            return;
+        }
+
+        $result = (new DeliveryHistoryImporter($this, $context))->import($file, $dryRun);
+        if ($result['refused']) {
+            echo __('plugins.importexport.common.cliError') . "\n";
+            echo __($result['refused']) . "\n";
+            return;
+        }
+
+        foreach ($result['report'] as $kind => $entries) {
+            echo "\n" . __('plugins.importexport.pmc.cli.importHistory.' . $kind, ['count' => count($entries)]) . "\n";
+            foreach ($entries as $entry) {
+                $line = __('plugins.importexport.pmc.cli.importHistory.entry', [
+                    'line' => $entry['line'],
+                    'doi' => $entry['doi'],
+                    'message' => $entry['key'] ? __($entry['key'], $entry['params']) : '',
+                ]);
+                echo '  ' . trim(preg_replace('/ {2,}/', ' ', $line)) . "\n";
+            }
+        }
+
+        echo "\n" . __(
+            $dryRun ? 'plugins.importexport.pmc.cli.importHistory.dryRun' : 'plugins.importexport.pmc.cli.importHistory.done',
+            ['publications' => $result['publications'], 'submissions' => $result['submissions']]
+        ) . "\n";
     }
 
     /**
@@ -798,6 +1007,11 @@ class PubmedCentralExportPlugin extends PubObjectsExportPlugin implements HasTas
      */
     public function usage($scriptName)
     {
+        echo __('plugins.importexport.pmc.cliUsage', [
+            'scriptName' => $scriptName,
+            'pluginName' => $this->getName(),
+            'columns' => implode(',', DeliveryHistoryImporter::COLUMNS),
+        ]) . "\n";
     }
 
     /**
@@ -1004,13 +1218,6 @@ class PubmedCentralExportPlugin extends PubObjectsExportPlugin implements HasTas
             $styleCheckErrors[] = 'PMC Style Check Error: ' . $error->textContent;
         }
 
-        // @todo Remove before release. Style check warnings are logged for development
-        // purposes only; they do not block an export and are invisible to users. Decide
-        // whether to surface them (as errors, or behind a setting) instead of logging.
-        $warnings = $filteredXml->getElementsByTagName('warning');
-        foreach ($warnings as $warning) {
-            error_log('PMC Style Warning: ' . $warning->textContent);
-        }
         return !empty($styleCheckErrors) ? implode(PHP_EOL, $styleCheckErrors) : true;
     }
 

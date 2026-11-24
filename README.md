@@ -44,7 +44,7 @@ The plugin will add a link to the PDF in the JATS XML prior to export.
 JATS XML may reference figures and other files, for example
 `<graphic xlink:href="figure1.jpg"/>`. Those files should be uploaded to the publication's media files, under the same
 file names the JATS XML refers to. The plugin packages each referenced file alongside the article and renames it to
-the scheme PubMed Central expects (`-g001` for a figure graphic, `-i001` for an inline graphic and `-s001` for
+a numbered name (`-g0000` for the first figure graphic, `-i0000` for an inline graphic and `-s0000` for
 supplementary material), updating the reference in the XML to match.
 
 If a media file is linked to a high-resolution version, the high-resolution file is the one packaged, since PubMed
@@ -95,6 +95,12 @@ the two together.
 
 If DOI versioning is enabled in OJS, then the user can deposit each major version of an article to PubMed Central.
 
+Without DOI versioning, an article's deposit status is recorded on the article rather than on its
+versions. Enabling DOI versioning after articles have been deposited therefore leaves their versions
+with no deposit status, so they appear not deposited and automatic deposits will send them again.
+Before enabling it, turn off automatic deposits, and once it is enabled, mark the versions already
+in PubMed Central registered before turning them back on.
+
 ### Earlier Versions
 
 Only versions of record are listed for deposit, and each is deposited on its own. Earlier versions of other stages,
@@ -111,6 +117,76 @@ job runs it becomes Deposited, or Failed with the error message.
 The SFTP account is optional -- Export can be used to download packages and deliver them manually --
 but partially filling it in is not: either all of host, username, and password, or none. Automatic
 deposit requires a complete account. Deposit actions only appear once all three are set.
+
+### Versions
+
+Each version of an article is numbered by its major version, and its package and files carry that
+number (e.g. `jtest-2025-e12345.v2`), as do its minor versions. The package name also carries a
+timestamp, which tells PubMed Central one delivery of a version from the next, so a correction to a
+version is delivered as a newer package of it.
+
+### Articles Delivered to PMC by Another Platform
+
+This section only applies to a journal that has imported a history with the command-line tool below;
+without one, nothing in it changes how packages are named. The tool requires DOI versioning, since
+each version is found by its own DOI.
+
+A journal moving to OJS from another platform can import the history of its articles indexed in
+PubMed Central, so that deliveries from OJS continue them. An imported version keeps the version
+number, file stem and package names it was delivered with, and a correction to it is sent as its next
+revision. A new version is numbered by its major version, offset to continue after the article's
+highest version indexed in PubMed Central: if PubMed Central indexes v1 to v4 and the imported
+versions are majors 1 to 3, major 4 is sent as v5. Its package and files are named from the article's
+package prefix, as written, with no timestamp (e.g. `openreseurope-4-openreseurope.4-83.v5.zip`), and
+a correction to it is sent as its next revision (`openreseurope-4-openreseurope.4-83.v5.r1.zip`). A
+version marked registered counts as delivered once. This suits articles whose earlier packages were
+named `{prefix}.vN` and `{prefix}.vN.rM`, as F1000's were, but not a platform that named its versions
+or revisions differently.
+
+The history is imported from a CSV file with one row per version:
+
+```
+doi,package_prefix,version,last_revision,file_stem,in_pmc
+10.12688/openreseurope.17317.4,openreseurope-4-openreseurope.4-83,4,0,openreseurope-4-27633,Y
+```
+
+| Column           | Contents                                                                                                         |
+|------------------|------------------------------------------------------------------------------------------------------------------|
+| `doi`            | The version's DOI, which finds its publication. Required.                                                        |
+| `package_prefix` | The part of the article's package names before `.vN`. The same for every version of an article.                  |
+| `version`        | The version number it is indexed under in PubMed Central. Required.                                              |
+| `last_revision`  | The highest revision delivered of it (`0` if none), counting packages PubMed Central rejected. Blank if unknown. |
+| `file_stem`      | The name its XML and PDF were delivered under, without the extension. Blank if unknown.                          |
+| `in_pmc`         | `Y` if it is indexed in PubMed Central, `N` if every package of it was rejected. Required.                       |
+
+Include a row for every version indexed in PubMed Central, even one with no publication in OJS, such
+as a version under review that was not migrated: it still counts towards the article's highest
+version, and is placed with its article by its package prefix. Minor versions share their version's
+DOI and take its history. A row whose DOI is shared by more than one major version, as versions
+published before DOI versioning was enabled can be, is reported as a conflict and not imported. A
+DOI in more than one row is also reported, and none of its rows are imported.
+
+The data can be retrieved from the PubMed Central Deposit Tracking System (DTS). Its package report
+lists each package delivered, with its file name, DOI and status: the file name gives the package
+prefix, version and revision (e.g. `openreseurope-4-openreseurope.4-139.v2.r3.tgz`), and a rejected
+package still counts towards the last revision. Its article details report gives the XML file name of
+each version indexed in PubMed Central, and so its file stem (e.g. `openreseurope-4-27633.xml`). Join
+the two on the package each version was last delivered in. A report can stop short of every row, so
+check that each version indexed in PubMed Central is included before importing.
+
+```bash
+php tools/importExport.php PubmedCentralExportPlugin importHistory [journal_path] [csvFile] --dry-run
+php tools/importExport.php PubmedCentralExportPlugin importHistory [journal_path] [csvFile]
+```
+
+Versions indexed in PubMed Central are marked registered unless they already have a deposit status.
+Correcting an imported version from OJS needs JATS XML uploaded to its publication, as any deposit
+does, and its file stem and last revision: a version missing either is reported as incomplete. The
+tool also reports rows it could not read, DOIs with no publication in the journal, rows that disagree
+with what is recorded, versions delivered from OJS since an earlier import, and versions not indexed
+in PubMed Central. Run it with `--dry-run` first to see the report without saving anything. The file
+can be imported again with more complete rows: a revision never goes back, and what a delivery from
+OJS has recorded is never replaced.
 
 ## What the Plugin Changes in Your JATS
 
@@ -146,6 +222,10 @@ version other than 1.2 skips DTD validation, with a warning, and is style checke
 Only publications with an uploaded JATS XML file can be exported. OJS-generated JATS has no usable body or media
 files, so a publication without an uploaded file fails to export.
 
+Each version is exported from the JATS XML uploaded to that publication. A new version starts with a copy of the
+uploaded file from the version it was made from, so replace it with the new version's JATS XML before depositing:
+otherwise the new version is sent with the earlier version's content.
+
 ## Troubleshooting
 
 If you are receiving validation errors, ensure you have entered the required metadata in your journal settings and/or
@@ -155,7 +235,7 @@ XML to meet the requirements of PubMed Central.
 ## PubMed Central StyleChecker Updates
 
 The StyleChecker validation files are periodically updated by PubMed Central. Updated file packages can be downloaded from
-[the Downloadable StyleChecker page](https://pmc.ncbi.nlm.nih.gov/pub/stylechecker-info/) and placed in the `xsl` directory,
+[the Downloadable StyleChecker page](https://pmc.ncbi.nlm.nih.gov/pub/stylechecker-info/) and placed in the `xsl` directory
 (`style-reporter.xsl` is not used and can be omitted).
 
 ## License

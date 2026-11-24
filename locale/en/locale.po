@@ -31,7 +31,7 @@ msgid "plugins.importexport.pmc.password"
 msgstr "Password"
 
 msgid "plugins.importexport.pmc.path"
-msgstr "Path"
+msgstr "Path (optional, defaults to the root directory)"
 
 msgid "plugins.importexport.pmc.port"
 msgstr "Port (optional, defaults to 22)"
@@ -106,6 +106,84 @@ msgstr "Collection year (from the issue or the article's publication date)"
 
 msgid "plugins.importexport.pmc.export.failure.journalNotFound"
 msgstr "The journal this deposit was queued for could not be found."
+
+msgid "plugins.importexport.pmc.export.failure.incompleteHistory"
+msgstr ""
+"This version was delivered to PubMed Central by another platform, and the names it was delivered under "
+"have not been imported, so a correction to it cannot be named. Import its history with "
+"the command-line tool, and deposit it again."
+
+msgid "plugins.importexport.pmc.cliUsage"
+msgstr ""
+"Usage:\n"
+"{$scriptName} {$pluginName} importHistory [journal_path] [csvFile] [--dry-run]\n"
+"\n"
+"Imports the history of articles indexed in PubMed Central that another platform delivered, so that "
+"deliveries from OJS continue their package names, version numbers and revisions. The CSV file has one row per "
+"version, with the columns: {$columns}\n"
+"Use --dry-run to report what would be imported without saving anything."
+
+msgid "plugins.importexport.pmc.cli.importHistory.doiVersioningRequired"
+msgstr ""
+"A history can only be imported into a journal with DOI versioning enabled. "
+"Enable it under Settings → Distribution → DOIs, and import again."
+
+msgid "plugins.importexport.pmc.cli.importHistory.fileNotReadable"
+msgstr "The file {$file} could not be read."
+
+msgid "plugins.importexport.pmc.cli.importHistory.entry"
+msgstr "Line {$line} {$doi} {$message}"
+
+msgid "plugins.importexport.pmc.cli.importHistory.invalid"
+msgstr "Rows that could not be read ({$count}):"
+
+msgid "plugins.importexport.pmc.cli.importHistory.notFound"
+msgstr "Versions not found in the journal, by DOI or by package prefix ({$count}):"
+
+msgid "plugins.importexport.pmc.cli.importHistory.conflicts"
+msgstr "Rows that disagree with what is already recorded, and were not imported ({$count}):"
+
+msgid "plugins.importexport.pmc.cli.importHistory.skipped"
+msgstr "Rows skipped ({$count}):"
+
+msgid "plugins.importexport.pmc.cli.importHistory.incomplete"
+msgstr "Versions imported with missing values, which cannot be deposited from OJS until those values are imported ({$count}):"
+
+msgid "plugins.importexport.pmc.cli.importHistory.notInPmc"
+msgstr "Versions not indexed in PubMed Central ({$count}):"
+
+msgid "plugins.importexport.pmc.cli.importHistory.invalidHeader"
+msgstr "The file is missing the columns: {$columns}"
+
+msgid "plugins.importexport.pmc.cli.importHistory.invalid.duplicate"
+msgstr "has a DOI that is in more than one row, so none of its rows were imported. Combine them into one row per version."
+
+msgid "plugins.importexport.pmc.cli.importHistory.invalid.value"
+msgstr "has a missing or invalid {$column} value."
+
+msgid "plugins.importexport.pmc.cli.importHistory.conflict.version"
+msgstr "is already recorded as version {$existing}."
+
+msgid "plugins.importexport.pmc.cli.importHistory.conflict.stem"
+msgstr "is already recorded with the file stem {$existing}."
+
+msgid "plugins.importexport.pmc.cli.importHistory.conflict.sharedDoi"
+msgstr "is the DOI of more than one version ({$versions}), so it cannot be told which version it describes. Give each version its own DOI and import again."
+
+msgid "plugins.importexport.pmc.cli.importHistory.conflict.prefix"
+msgstr "belongs to an article with more than one package prefix: {$prefixes}."
+
+msgid "plugins.importexport.pmc.cli.importHistory.deliveredFromOjs"
+msgstr "has been delivered from OJS since it was imported."
+
+msgid "plugins.importexport.pmc.cli.importHistory.missing"
+msgstr "is missing: {$columns}."
+
+msgid "plugins.importexport.pmc.cli.importHistory.dryRun"
+msgstr "Dry run: {$publications} publications and {$submissions} submissions would be updated. Nothing was saved."
+
+msgid "plugins.importexport.pmc.cli.importHistory.done"
+msgstr "{$publications} publications and {$submissions} submissions were updated."
 
 msgid "plugins.importexport.pmc.export.failure.missingMediaFile"
 msgstr ""
