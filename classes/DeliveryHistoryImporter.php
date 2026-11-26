@@ -32,6 +32,7 @@ use APP\plugins\generic\pubmedCentral\PubmedCentralExportPlugin;
 use APP\plugins\PubObjectsExportPlugin;
 use APP\publication\Publication;
 use APP\submission\Submission;
+use Illuminate\Support\Facades\DB;
 use PKP\context\Context;
 
 class DeliveryHistoryImporter
@@ -340,7 +341,7 @@ class DeliveryHistoryImporter
     {
         $key = strtolower($doi);
         if (!array_key_exists($key, $this->found)) {
-            $submission = Repo::submission()->getByDoi($doi, $this->context->getId());
+            $submission = $this->findSubmission($doi);
             $publications = $submission?->getData('publications')
                 ->filter(fn (Publication $publication) => strcasecmp((string) $publication->getDoi(), $doi) === 0)
                 ->values()
@@ -349,6 +350,21 @@ class DeliveryHistoryImporter
         }
 
         return $this->found[$key];
+    }
+
+    /**
+     * The journal's article with a version that has this DOI, ignoring letter case as DOIs do.
+     */
+    protected function findSubmission(string $doi): ?Submission
+    {
+        $submissionId = DB::table('publications AS p')
+            ->join('submissions AS s', 's.submission_id', '=', 'p.submission_id')
+            ->join('dois AS d', 'd.doi_id', '=', 'p.doi_id')
+            ->where('s.context_id', '=', $this->context->getId())
+            ->whereRaw('LOWER(d.doi) = LOWER(?)', [$doi])
+            ->value('p.submission_id');
+
+        return $submissionId ? Repo::submission()->get((int) $submissionId) : null;
     }
 
     protected function save(Submission|Publication $object, array $params): void

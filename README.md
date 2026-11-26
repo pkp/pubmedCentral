@@ -139,7 +139,8 @@ highest version indexed in PubMed Central: if PubMed Central indexes v1 to v4 an
 versions are majors 1 to 3, major 4 is sent as v5. Its package and files are named from the article's
 package prefix, as written, with no timestamp (e.g. `openreseurope-4-openreseurope.4-83.v5.zip`), and
 a correction to it is sent as its next revision (`openreseurope-4-openreseurope.4-83.v5.r1.zip`). A
-version marked registered counts as delivered once. This suits articles whose earlier packages were
+version marked registered counts as delivered once, and a correction marked registered, as when it
+is delivered by hand, counts as the revision it would have been sent as. This suits articles whose earlier packages were
 named `{prefix}.vN` and `{prefix}.vN.rM`, as F1000's were, but not a platform that named its versions
 or revisions differently.
 

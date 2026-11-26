@@ -2842,6 +2842,96 @@ class PubmedCentralExportPluginTest extends PKPTestCase
         $this->assertSame([], $saved);
     }
 
+    /**
+     * Build the plugin with a repository that saves as Repo::publication()->edit() does: from
+     * the values the object holds and the params given, deleting any value left out.
+     */
+    private function createSavingPlugin(Submission $submission, object $stored): PubmedCentralExportPlugin
+    {
+        $plugin = $this->getMockBuilder(PubmedCentralExportPlugin::class)
+            ->disableOriginalConstructor()
+            ->onlyMethods(['submissionOf', 'getObjectRepo'])
+            ->getMock();
+        $plugin->method('submissionOf')->willReturn($submission);
+        $plugin->method('getObjectRepo')->willReturn(new class ($stored) {
+            public function __construct(private object $stored)
+            {
+            }
+
+            public function edit(Publication $publication, array $params): void
+            {
+                $this->stored->data = array_filter(array_merge($publication->_data, $params), fn ($value) => $value !== null);
+            }
+        });
+
+        return $plugin;
+    }
+
+    public function testRecordingADeliveryKeepsTheStatusSavedBeforeIt(): void
+    {
+        $publication = $this->createVersion(3, 1, ['pubmedCentral::status' => PubObjectsExportPlugin::EXPORT_STATUS_SUBMITTED]);
+        $stored = (object) ['data' => []];
+        $plugin = $this->createSavingPlugin($this->createArticle([$publication], [
+            ImportedHistory::SETTING_PACKAGE_PREFIX => self::PREFIX,
+        ]), $stored);
+
+        $plugin->updateStatus($publication, PubObjectsExportPlugin::EXPORT_STATUS_REGISTERED);
+        $plugin->recordDelivery($publication, 1);
+
+        $this->assertSame(PubObjectsExportPlugin::EXPORT_STATUS_REGISTERED, $stored->data['pubmedCentral::status']);
+        $this->assertSame('1', $stored->data[ImportedHistory::SETTING_REVISION]);
+    }
+
+    public function testQueuingADeliveryKeepsTheDeliveryPreparedForIt(): void
+    {
+        $publication = $this->createVersion(3, 1, ['pubmedCentral::status' => PubObjectsExportPlugin::EXPORT_STATUS_MARKEDREGISTERED]);
+        $stored = (object) ['data' => []];
+        $plugin = $this->createSavingPlugin($this->createArticle([$publication], [
+            ImportedHistory::SETTING_PACKAGE_PREFIX => self::PREFIX,
+        ]), $stored);
+
+        $plugin->prepareDelivery($publication);
+        $plugin->updateStatus($publication, PubObjectsExportPlugin::EXPORT_STATUS_SUBMITTED);
+
+        $this->assertSame(PubObjectsExportPlugin::EXPORT_STATUS_SUBMITTED, $stored->data['pubmedCentral::status']);
+        $this->assertSame('0', $stored->data[ImportedHistory::SETTING_REVISION]);
+    }
+
+    public function testMarkingACorrectionRegisteredRecordsItsRevision(): void
+    {
+        $version = $this->createVersion(3, 1, ['pubmedCentral::status' => PubObjectsExportPlugin::EXPORT_STATUS_MARKEDREGISTERED]);
+        $correction = $this->createVersion(4, 1, ['pubmedCentral::status' => PubObjectsExportPlugin::EXPORT_STATUS_STALE], 1);
+        $submission = $this->createArticle([$version, $correction], [
+            ImportedHistory::SETTING_PACKAGE_PREFIX => self::PREFIX,
+        ]);
+        $stored = (object) ['data' => []];
+        $plugin = $this->createSavingPlugin($submission, $stored);
+
+        $plugin->markRegistered([$correction]);
+
+        $this->assertSame(PubObjectsExportPlugin::EXPORT_STATUS_MARKEDREGISTERED, $stored->data['pubmedCentral::status']);
+        $this->assertSame('1', $stored->data[ImportedHistory::SETTING_REVISION]);
+        $this->assertSame(2, $this->invoke($plugin, 'nextRevision', [$correction, $submission]));
+    }
+
+    /**
+     * Marking registered a version not yet in PMC may only mean another platform delivered it,
+     * so it records no revision, and its history can still be imported.
+     */
+    public function testMarkingAVersionNotYetInPmcRegisteredRecordsNoRevision(): void
+    {
+        $publication = $this->createVersion(3, 1);
+        $stored = (object) ['data' => []];
+        $plugin = $this->createSavingPlugin($this->createArticle([$publication], [
+            ImportedHistory::SETTING_PACKAGE_PREFIX => self::PREFIX,
+        ]), $stored);
+
+        $plugin->markRegistered([$publication]);
+
+        $this->assertSame(PubObjectsExportPlugin::EXPORT_STATUS_MARKEDREGISTERED, $stored->data['pubmedCentral::status']);
+        $this->assertArrayNotHasKey(ImportedHistory::SETTING_REVISION, $stored->data);
+    }
+
     public static function historyProvider(): array
     {
         $complete = [

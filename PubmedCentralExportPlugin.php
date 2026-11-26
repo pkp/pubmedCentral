@@ -16,6 +16,7 @@ namespace APP\plugins\generic\pubmedCentral;
 
 use APP\core\Application;
 use APP\facades\Repo;
+use APP\issue\Issue;
 use APP\notification\NotificationManager;
 use APP\plugins\generic\pubmedCentral\classes\DeliveryHistoryImporter;
 use APP\plugins\generic\pubmedCentral\classes\form\PubmedCentralSettingsForm;
@@ -318,12 +319,42 @@ class PubmedCentralExportPlugin extends PubObjectsExportPlugin implements HasTas
     }
 
     /**
+     * Record the revision of a correction delivered by hand. A version not yet in PMC
+     * records nothing, since marking it registered may only mean another platform delivered
+     * it, and its history can then still be imported.
+     *
+     * For articles with imported history only.
+     */
+    public function markRegistered($objects)
+    {
+        foreach ($objects as $object) {
+            $revision = $this->continuesHistory($object) ? $this->nextRevision($object, $this->submissionOf($object)) : null;
+            parent::markRegistered([$object]);
+            if ($revision) {
+                $this->recordDelivery($object, $revision);
+            }
+        }
+    }
+
+    /**
      * Whether a publication's packages continue the names of an imported history, the only
      * names that count revisions.
      */
     protected function continuesHistory(Submission|Publication $object): bool
     {
         return $object instanceof Publication && ImportedHistory::packagePrefix($this->submissionOf($object)) !== null;
+    }
+
+    /**
+     * Also set the saved values on the object, since a save writes every value the object
+     * holds, so a later save from the same object would otherwise undo this one.
+     */
+    protected function updateObject(Submission|Publication|Issue|Galley $object, ?array $editParams = [])
+    {
+        parent::updateObject($object, $editParams);
+        foreach ($editParams ?? [] as $name => $value) {
+            $object->setData($name, $value);
+        }
     }
 
     protected function submissionOf(Publication $publication): ?Submission
